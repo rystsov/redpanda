@@ -15,6 +15,7 @@
 #include "cluster/controller.h"
 #include "cluster/fwd.h"
 #include "coproc/event_listener.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "coproc/pacemaker.h"
 #include "pandaproxy/configuration.h"
 #include "pandaproxy/fwd.h"
@@ -77,6 +78,7 @@ public:
     ss::sharded<kafka::quota_manager> quota_mgr;
     ss::sharded<cluster::id_allocator_frontend> id_allocator_frontend;
     ss::sharded<archival::scheduler_service> archival_scheduler;
+    ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
 
 private:
     using deferred_actions

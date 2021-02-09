@@ -26,6 +26,13 @@ CONCEPT(requires(KafkaApiHandler<Request>))
 struct process_dispatch {
     static ss::future<response_ptr>
     process(request_context&& ctx, ss::smp_service_group g) {
+        vlog(
+            klog.info,
+            "process_dispatch:process name:{}, key:{}, version:{} for {}",
+            Request::api::name,
+            ctx.header().key,
+            ctx.header().version,
+            ctx.header().client_id.value_or(std::string_view("unset-client-id")));
         if (
           ctx.header().version < Request::min_supported
           || ctx.header().version > Request::max_supported) {
@@ -35,6 +42,10 @@ struct process_dispatch {
                 ctx.header().version,
                 Request::api::name)));
         }
+        vlog(
+            klog.info,
+            "prehandle name:{}",
+            Request::api::name);
         return Request::handle(std::move(ctx), g);
     }
 };
@@ -59,7 +70,7 @@ CONCEPT(requires(KafkaApiHandler<Request>))
 ss::future<response_ptr> do_process(
   request_context&& ctx, ss::smp_service_group g) {
     vlog(
-      klog.trace,
+      klog.info,
       "Processing name:{}, key:{}, version:{} for {}",
       Request::api::name,
       ctx.header().key,
