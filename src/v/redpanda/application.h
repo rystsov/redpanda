@@ -81,6 +81,7 @@ public:
     ss::sharded<archival::scheduler_service> archival_scheduler;
     ss::sharded<cluster::rm_group_frontend> rm_group_frontend;
     ss::sharded<cluster::rm_partition_frontend> rm_partition_frontend;
+    ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
 
 private:
     using deferred_actions

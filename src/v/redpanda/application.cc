@@ -14,6 +14,7 @@
 #include "cluster/cluster_utils.h"
 #include "cluster/id_allocator.h"
 #include "cluster/id_allocator_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "cluster/metadata_dissemination_handler.h"
 #include "cluster/metadata_dissemination_service.h"
 #include "cluster/partition_manager.h"
@@ -607,6 +608,24 @@ void application::wire_up_redpanda_services() {
       std::ref(coordinator_ntp_mapper),
       std::ref(group_router))
       .get();
+    
+        
+    syschecks::systemd_message("Creating tx coordinator frontend").get();
+    construct_service(
+      tx_gateway_frontend,
+      smp_service_groups.raft_smp_sg(),
+      std::ref(partition_manager),
+      std::ref(shard_table),
+      std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
+      std::ref(controller),
+      std::ref(id_allocator_frontend),
+      std::ref(rm_group_frontend),
+      std::ref(rm_partition_frontend),
+      std::ref(coordinator_ntp_mapper),
+      std::ref(group_router))
+      .get();
 
     rpc::server_configuration kafka_cfg("kafka_rpc");
     kafka_cfg.max_service_memory_per_core = memory_groups::kafka_total_memory();
@@ -778,10 +797,11 @@ void application::start_redpanda() {
             partition_manager,
             coordinator_ntp_mapper,
             fetch_session_cache,
-            std::ref(id_allocator_frontend),
+            id_allocator_frontend,
             controller->get_credential_store(),
             controller->get_authorizer(),
-            controller->get_security_frontend());
+            controller->get_security_frontend(),
+            tx_gateway_frontend);
           s.set_protocol(std::move(proto));
       })
       .get();
