@@ -12,6 +12,7 @@
 #include "cluster/cluster_utils.h"
 #include "cluster/id_allocator.h"
 #include "cluster/id_allocator_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "cluster/metadata_dissemination_handler.h"
 #include "cluster/metadata_dissemination_service.h"
 #include "cluster/partition_manager.h"
@@ -517,6 +518,11 @@ void application::wire_up_services() {
       std::ref(controller->get_partition_leaders()),
       std::ref(controller))
       .get();
+    
+    syschecks::systemd_message("Creating tx coordinator frontend").get();
+    construct_service(
+      tx_gateway_frontend)
+      .get();
 
     rpc::server_configuration kafka_cfg("kafka_rpc");
     kafka_cfg.max_service_memory_per_core = memory_groups::kafka_total_memory();
@@ -638,7 +644,8 @@ void application::start() {
             partition_manager,
             coordinator_ntp_mapper,
             fetch_session_cache,
-            std::ref(id_allocator_frontend));
+            std::ref(id_allocator_frontend),
+            std::ref(tx_gateway_frontend));
           s.set_protocol(std::move(proto));
       })
       .get();

@@ -31,6 +31,7 @@ v_cc_library(
     cluster_utils.cc
     id_allocator.cc
     id_allocator_frontend.cc
+    tx_gateway_frontend.cc
     service.cc
     metadata_dissemination_handler.cc
     metadata_dissemination_service.cc

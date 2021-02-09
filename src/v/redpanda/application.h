@@ -13,6 +13,7 @@
 
 #include "cluster/controller.h"
 #include "cluster/fwd.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "coproc/pacemaker.h"
 #include "coproc/service.h"
 #include "coproc/wasm_event_listener.h"
@@ -65,6 +66,7 @@ public:
     smp_groups smp_service_groups;
     ss::sharded<kafka::quota_manager> quota_mgr;
     ss::sharded<cluster::id_allocator_frontend> id_allocator_frontend;
+    ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
 
 private:
     using deferred_actions
