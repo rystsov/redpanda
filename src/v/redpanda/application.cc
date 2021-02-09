@@ -521,7 +521,9 @@ void application::wire_up_services() {
     
     syschecks::systemd_message("Creating tx coordinator frontend").get();
     construct_service(
-      tx_gateway_frontend)
+      tx_gateway_frontend,
+      std::ref(metadata_cache),
+      std::ref(controller))
       .get();
 
     rpc::server_configuration kafka_cfg("kafka_rpc");
