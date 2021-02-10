@@ -9,6 +9,7 @@
 
 #include "kafka/server/handlers/produce.h"
 
+#include "config/configuration.h"
 #include "bytes/iobuf.h"
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_manager.h"
@@ -456,9 +457,10 @@ produce_handler::handle(request_context&& ctx, ss::smp_service_group ssg) {
      * authorization failed.
      */
     if (request.has_transactional) {
-        return ctx.respond(request.make_error_response(
-          error_code::transactional_id_authorization_failed));
-
+        if (!config::shard_local_cfg().enable_transactions.value()) {
+            return ctx.respond(request.make_error_response(
+              error_code::transactional_id_authorization_failed));
+        }
     } else if (request.has_idempotent) {
         if (!ctx.is_idempotence_enabled()) {
             return ctx.respond(request.make_error_response(
