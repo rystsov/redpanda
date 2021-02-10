@@ -274,6 +274,9 @@ STRUCT_TYPES = [
     "DeleteAclsFilter",
     "DeleteAclsFilterResult",
     "DeleteAclsMatchingAcl",
+    "AddPartitionsToTxnTopic",
+    "AddPartitionsToTxnTopicResult",
+    "AddPartitionsToTxnPartitionResult",
 ]
 
 SCALAR_TYPES = list(basic_type_map.keys())
