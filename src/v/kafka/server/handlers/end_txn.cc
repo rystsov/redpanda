@@ -27,8 +27,11 @@ ss::future<response_ptr> end_txn_handler::handle(request_context&& ctx, [[maybe_
     return ss::do_with(std::move(ctx), [](request_context& ctx) {
         end_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-        return ss::make_exception_future<response_ptr>(std::runtime_error(
-            fmt::format("Unsupported API {}", ctx.header().key)));
+        
+        end_txn_response response;
+        response.data.error_code = kafka::error_code::none;
+        
+        return ctx.respond(std::move(response));
     });
 }
 
