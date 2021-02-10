@@ -53,7 +53,10 @@ using request_types = make_request_types<
   describe_acls_handler,
   describe_log_dirs_handler,
   create_acls_handler,
-  delete_acls_handler>;
+  delete_acls_handler,
+  init_producer_id_handler
+  add_partitions_to_txn_handler,
+  end_txn_handler>;
 
 template<typename RequestType>
 static auto make_api() {

@@ -48,7 +48,11 @@ set(schemata
   create_acls_request.json
   create_acls_response.json
   delete_acls_request.json
-  delete_acls_response.json)
+  delete_acls_response.json
+  add_partitions_to_txn_request.json
+  add_partitions_to_txn_response.json
+  end_txn_request.json
+  end_txn_response.json)
 
 set(srcs)
 foreach(schema ${schemata})
