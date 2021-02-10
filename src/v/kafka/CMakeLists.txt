@@ -6,6 +6,7 @@ set(security_srcs
 set(handlers_srcs
   server/handlers/api_versions.cc
   server/handlers/metadata.cc
+  server/handlers/add_partitions_to_txn.cc
   server/handlers/list_groups.cc
   server/handlers/find_coordinator.cc
   server/handlers/describe_configs.cc
