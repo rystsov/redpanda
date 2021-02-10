@@ -42,7 +42,9 @@ set(schemata
   delete_groups_request.json
   delete_groups_response.json
   add_partitions_to_txn_request.json
-  add_partitions_to_txn_response.json)
+  add_partitions_to_txn_response.json
+  end_txn_request.json
+  end_txn_response.json)
 
 set(srcs)
 foreach(schema ${schemata})
