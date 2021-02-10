@@ -33,3 +33,4 @@
 #include "kafka/server/handlers/sasl_authenticate.h"
 #include "kafka/server/handlers/sasl_handshake.h"
 #include "kafka/server/handlers/sync_group.h"
+#include "kafka/server/handlers/add_partitions_to_txn.h"

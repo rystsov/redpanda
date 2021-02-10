@@ -40,7 +40,9 @@ set(schemata
   incremental_alter_configs_request.json
   incremental_alter_configs_response.json
   delete_groups_request.json
-  delete_groups_response.json)
+  delete_groups_response.json
+  add_partitions_to_txn_request.json
+  add_partitions_to_txn_response.json)
 
 set(srcs)
 foreach(schema ${schemata})
