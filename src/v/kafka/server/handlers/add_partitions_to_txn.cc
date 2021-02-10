@@ -28,8 +28,21 @@ ss::future<response_ptr> add_partitions_to_txn_handler::handle(
      return ss::do_with(std::move(ctx), [](request_context& ctx) {
         add_partitions_to_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-        return ss::make_exception_future<response_ptr>(std::runtime_error(
-          fmt::format("Unsupported API {}", ctx.header().key)));
+
+        add_partitions_to_txn_response response;
+        for (auto& req_topic : request.data.topics) {
+            add_partitions_to_txn_topic_result res_topic;
+            res_topic.name = req_topic.name;
+            for (int32_t req_partition : req_topic.partitions) {
+                add_partitions_to_txn_partition_result res_partition;
+                res_partition.partition_index = req_partition;
+                res_partition.error_code = kafka::error_code::none;
+                res_topic.results.push_back(res_partition);
+            }
+            response.data.results.push_back(res_topic);
+        }
+
+        return ctx.respond(std::move(response));
      });
 }
 
