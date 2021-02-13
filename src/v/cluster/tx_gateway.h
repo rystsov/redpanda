@@ -1,0 +1,41 @@
+/*
+ * Copyright 2020 Vectorized, Inc.
+ *
+ * Use of this software is governed by the Business Source License
+ * included in the file licenses/BSL.md
+ *
+ * As of the Change Date specified in that file, in accordance with
+ * the Business Source License, use of this software will be governed
+ * by the Apache License, Version 2.0
+ */
+
+#pragma once
+#include "cluster/fwd.h"
+#include "cluster/tx_gateway_service.h"
+
+#include <seastar/core/sharded.hh>
+
+namespace cluster {
+
+class tx_gateway final : public tx_gateway_service {
+public:
+    tx_gateway(
+      ss::scheduling_group,
+      ss::smp_service_group);
+
+    virtual ss::future<begin_tx_reply>
+    begin_tx(begin_tx_request&&, rpc::streaming_context&) final;
+
+    virtual ss::future<prepare_tx_reply>
+    prepare_tx(prepare_tx_request&&, rpc::streaming_context&) final;
+
+    virtual ss::future<commit_tx_reply>
+    commit_tx(commit_tx_request&&, rpc::streaming_context&) final;
+
+    virtual ss::future<abort_tx_reply>
+    abort_tx(abort_tx_request&&, rpc::streaming_context&) final;
+
+    virtual ss::future<ping_tm_reply>
+    ping_tm(ping_tm_request&&, rpc::streaming_context&) final;
+};
+}

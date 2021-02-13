@@ -12,6 +12,7 @@
 #include "cluster/cluster_utils.h"
 #include "cluster/id_allocator.h"
 #include "cluster/id_allocator_frontend.h"
+#include "cluster/tx_gateway.h"
 #include "cluster/tx_gateway_frontend.h"
 #include "cluster/metadata_dissemination_handler.h"
 #include "cluster/metadata_dissemination_service.h"
@@ -589,6 +590,9 @@ void application::start() {
             _scheduling_groups.raft_sg(),
             smp_service_groups.raft_smp_sg(),
             std::ref(id_allocator_frontend));
+          proto->register_service<cluster::tx_gateway>(
+            _scheduling_groups.raft_sg(),
+            smp_service_groups.raft_smp_sg());
           proto->register_service<
             raft::service<cluster::partition_manager, cluster::shard_table>>(
             _scheduling_groups.raft_sg(),
