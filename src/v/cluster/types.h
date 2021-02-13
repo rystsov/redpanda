@@ -88,6 +88,17 @@ inline std::error_code make_error_code(tx_errc e) noexcept {
     return std::error_code(static_cast<int>(e), tx_error_category());
 }
 
+struct begin_tx_request { };
+struct begin_tx_reply { };
+struct prepare_tx_request { };
+struct prepare_tx_reply { };
+struct commit_tx_request { };
+struct commit_tx_reply { };
+struct abort_tx_request { };
+struct abort_tx_reply { };
+struct ping_tm_request { };
+struct ping_tm_reply { };
+
 /// Join request sent by node to join raft-0
 struct join_request {
     explicit join_request(model::broker b)
