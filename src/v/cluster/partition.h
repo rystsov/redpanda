@@ -21,6 +21,7 @@
 #include "raft/group_configuration.h"
 #include "raft/log_eviction_stm.h"
 #include "cluster/tx_stm.h"
+#include "cluster/tm_stm.h"
 #include "raft/types.h"
 #include "storage/types.h"
 
@@ -136,6 +137,10 @@ public:
         return _tx_stm;
     }
 
+    ss::shared_ptr<cluster::tm_stm>& tm_stm() {
+        return _tm_stm;
+    }
+
 private:
     friend partition_manager;
 
@@ -147,6 +152,7 @@ private:
     ss::lw_shared_ptr<cluster::id_allocator_stm> _id_allocator_stm;
     ss::shared_ptr<seq_stm> _seq_stm;
     ss::shared_ptr<cluster::tx_stm> _tx_stm;
+    ss::shared_ptr<cluster::tm_stm> _tm_stm;
     ss::abort_source _as;
     partition_probe _probe;
 
