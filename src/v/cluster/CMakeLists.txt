@@ -58,6 +58,7 @@ v_cc_library(
     partition_probe.cc
     seq_stm.cc
     id_allocator_stm.cc
+    tx_stm.cc
   DEPS
     Seastar::seastar
     controller_rpc
