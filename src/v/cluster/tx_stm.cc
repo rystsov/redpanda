@@ -196,6 +196,7 @@ tx_stm::replicate(
   [[maybe_unused]] model::batch_identity bid,
   model::record_batch_reader&& r,
   raft::replicate_options opts) {
+    vlog(clusterlog.info, "tx replicating");
     return _c->replicate(std::move(r), std::move(opts))
       .then([](result<raft::replicate_result> r) {
           if (r) {
@@ -234,7 +235,9 @@ tx_stm::catchup(model::term_id last_term, model::offset last_offset) {
 
 void tx_stm::compact_snapshot() { }
 
-ss::future<> tx_stm::apply([[maybe_unused]] model::record_batch b) {
+ss::future<> tx_stm::apply(model::record_batch b) {
+    _insync_offset = b.last_offset();
+    
     return ss::now();
 }
 
