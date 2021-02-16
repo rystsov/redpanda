@@ -43,6 +43,8 @@ struct allocate_id_reply {
 
 /* begin tx types */
 
+struct init_tm_tx_request { };
+struct init_tm_tx_reply { };
 struct begin_tx_request { };
 struct begin_tx_reply { };
 struct prepare_tx_request { };
