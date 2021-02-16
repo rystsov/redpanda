@@ -88,6 +88,8 @@ inline std::error_code make_error_code(tx_errc e) noexcept {
     return std::error_code(static_cast<int>(e), tx_error_category());
 }
 
+struct init_tm_tx_request { };
+struct init_tm_tx_reply { };
 struct begin_tx_request { };
 struct begin_tx_reply { };
 struct prepare_tx_request { };

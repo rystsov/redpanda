@@ -23,6 +23,9 @@ public:
       ss::scheduling_group,
       ss::smp_service_group);
 
+    virtual ss::future<init_tm_tx_reply>
+    init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) final;
+    
     virtual ss::future<begin_tx_reply>
     begin_tx(begin_tx_request&&, rpc::streaming_context&) final;
 

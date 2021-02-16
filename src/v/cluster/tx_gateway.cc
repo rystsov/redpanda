@@ -23,6 +23,10 @@ tx_gateway::tx_gateway(
   ss::smp_service_group ssg)
   : tx_gateway_service(sg, ssg) {}
 
+ss::future<init_tm_tx_reply>
+tx_gateway::init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) {
+    return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply());
+}
 
 ss::future<begin_tx_reply>
 tx_gateway::begin_tx(begin_tx_request&&, rpc::streaming_context&) {
