@@ -12,8 +12,10 @@
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
 #include "cluster/tx_gateway_service.h"
+#include "cluster/id_allocator_frontend.h"
 
 #include "cluster/logger.h"
+#include "errc.h"
 
 namespace cluster {
 
@@ -24,14 +26,16 @@ tx_gateway_frontend::tx_gateway_frontend(
     ss::sharded<cluster::metadata_cache>& metadata_cache,
     ss::sharded<rpc::connection_cache>& connection_cache,
     ss::sharded<partition_leaders_table>& leaders,
-    std::unique_ptr<cluster::controller>& controller)
+    std::unique_ptr<cluster::controller>& controller,
+    ss::sharded<cluster::id_allocator_frontend>& id_allocator_frontend)
     : _ssg(ssg)
     , _partition_manager(partition_manager)
     , _shard_table(shard_table)
     , _metadata_cache(metadata_cache)
     , _connection_cache(connection_cache)
     , _leaders(leaders)
-    , _controller(controller) {}
+    , _controller(controller)
+    , _id_allocator_frontend(id_allocator_frontend) {}
 
 ss::future<std::optional<model::node_id>>
 tx_gateway_frontend::get_tx_broker([[maybe_unused]] ss::sstring key) {
@@ -360,6 +364,161 @@ tx_gateway_frontend::do_abort_tx(model::ntp ntp, model::producer_identity pid, m
           return stm->abort_tx(pid, model::timeout_clock::now() + timeout).then([](){
               return cluster::abort_tx_reply();
           });
+      });
+}
+
+ss::future<cluster::init_tm_tx_reply>
+tx_gateway_frontend::init_tm_tx(kafka::transactional_id tx_id, model::timeout_clock::duration timeout) {
+    auto nt = model::topic_namespace(
+      model::kafka_internal_namespace, model::kafka_tx_topic);
+    
+    if (!_metadata_cache.local().contains(nt, model::partition_id(0))) {
+        return ss::make_ready_future<cluster::init_tm_tx_reply>(cluster::init_tm_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        });
+    }
+
+    auto leader = _leaders.local().get_leader(model::kafka_tx_ntp);
+    if (!leader) {
+        vlog(clusterlog.warn, "can't find a leader for {}", model::kafka_tx_ntp);
+        return ss::make_ready_future<init_tm_tx_reply>(cluster::init_tm_tx_reply {
+            .ec = tx_errc::leader_not_found
+        });
+    }
+
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        return do_init_tm_tx(tx_id, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching abort tx to {} from {}", leader, _self);
+
+    return dispatch_init_tm_tx(leader.value(), tx_id, timeout);
+}
+
+ss::future<init_tm_tx_reply>
+tx_gateway_frontend::dispatch_init_tm_tx(model::node_id leader, kafka::transactional_id tx_id, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [tx_id, timeout](tx_gateway_client_protocol cp) {
+            return cp.init_tm_tx(
+              init_tm_tx_request{
+                  .tx_id = tx_id,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<init_tm_tx_reply>)
+      .then([](result<init_tm_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote abort tx",
+                r.error());
+              return init_tm_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<cluster::init_tm_tx_reply>
+tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout_clock::duration timeout) {
+    auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", model::kafka_tx_ntp);
+        return ss::make_ready_future<init_tm_tx_reply>(cluster::init_tm_tx_reply {
+            .ec = tx_errc::shard_not_found
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [this, tx_id, timeout](cluster::partition_manager& mgr) mutable {
+          auto partition = mgr.get(model::kafka_tx_ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", model::kafka_tx_ntp);
+              return ss::make_ready_future<init_tm_tx_reply>(cluster::init_tm_tx_reply {
+                  .ec = tx_errc::partition_not_found
+              });
+          }
+
+          auto& stm = partition->tm_stm();
+          
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tm stm of the {}' partition", model::kafka_tx_ntp);
+              return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply{
+                  .ec = tx_errc::stm_not_found
+              });
+          }
+
+          auto maybe_tx = stm->get_tx(tx_id);
+
+          if (maybe_tx) {
+              auto tx = maybe_tx.value();
+
+              auto f = ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx);
+
+              return f.then([&stm](checked<tm_transaction, tx_errc> r){
+                  if (r.has_value()) {
+                      auto tx = r.value();
+                      // TODO: check epoch overflow
+                      model::producer_identity pid {
+                          .id = tx.pid.id,
+                          .epoch = static_cast<int16_t>(tx.pid.epoch + 1)
+                      };
+                      return stm->re_register_producer(tx.id, tx.etag, pid).then([pid](tm_stm::op_status op_status) {
+                          init_tm_tx_reply reply {
+                              .pid = pid
+                          };
+                          if (op_status == tm_stm::op_status::success) {
+                              reply.ec = tx_errc::success;
+                          } else if (op_status == tm_stm::op_status::conflict) {
+                              reply.ec = tx_errc::conflict;
+                          } else {
+                              // timeout or error => result unknown
+                              reply.ec = tx_errc::timeout;
+                          }
+                          return reply;
+                      });
+                  } else {
+                      return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply {
+                        .ec = tx_errc::timeout
+                      }); 
+                  }
+              });
+          } else {
+              return _id_allocator_frontend.local().allocate_id(timeout).then([&stm, tx_id](allocate_id_reply pid_reply){
+                  if (pid_reply.ec == errc::success) {
+                      model::producer_identity pid {
+                          .id = pid_reply.id,
+                          .epoch = 0
+                      };
+                      return stm->register_new_producer(tx_id, pid).then([pid](tm_stm::op_status op_status) {
+                          init_tm_tx_reply reply {
+                              .pid = pid
+                          };
+                          if (op_status == tm_stm::op_status::success) {
+                              reply.ec = tx_errc::success;
+                          } else if (op_status == tm_stm::op_status::conflict) {
+                              reply.ec = tx_errc::conflict;
+                          } else {
+                              reply.ec = tx_errc::timeout;
+                          }
+                          return reply;
+                      });
+                  } else {
+                      return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply {
+                        .ec = tx_errc::timeout
+                      });
+                  }
+              });
+          }
       });
 }
 

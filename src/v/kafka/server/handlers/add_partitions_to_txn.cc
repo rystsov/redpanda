@@ -29,6 +29,14 @@ ss::future<response_ptr> add_partitions_to_txn_handler::handle(
         add_partitions_to_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
 
+        /*
+            if transactionalId:
+                tx_gateway.init_tx(transactionalId)
+            else
+                pass
+        */
+
+
         add_partitions_to_txn_response response;
         for (auto& req_topic : request.data.topics) {
             add_partitions_to_txn_topic_result res_topic;

@@ -19,6 +19,7 @@
 #include "model/record_batch_types.h"
 #include "model/timeout_clock.h"
 #include "raft/types.h"
+#include "kafka/types.h"
 #include "storage/ntp_config.h"
 #include "tristate.h"
 #include "utils/to_string.h"
@@ -88,8 +89,16 @@ inline std::error_code make_error_code(tx_errc e) noexcept {
     return std::error_code(static_cast<int>(e), tx_error_category());
 }
 
-struct init_tm_tx_request { };
-struct init_tm_tx_reply { };
+struct init_tm_tx_request {
+    kafka::transactional_id tx_id;
+    model::timeout_clock::duration timeout;
+};
+struct init_tm_tx_reply {
+    // partition_not_exists, not_leader, topic_not_exists
+    model::producer_identity pid;
+    tx_errc ec;
+};
+
 struct begin_tx_request { };
 struct begin_tx_reply { };
 struct prepare_tx_request {
