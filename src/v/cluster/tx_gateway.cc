@@ -27,8 +27,8 @@ tx_gateway::tx_gateway(
   , _tx_gateway_frontend(tx_gateway_frontend) {}
 
 ss::future<init_tm_tx_reply>
-tx_gateway::init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply());
+tx_gateway::init_tm_tx(init_tm_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_init_tm_tx(request.tx_id, request.timeout);
 }
 
 ss::future<begin_tx_reply>

@@ -21,6 +21,7 @@
 #include "cluster/metadata_cache.h"
 #include "seastarx.h"
 #include "cluster/tx_gateway.h"
+#include "cluster/tm_stm.h"
 
 namespace cluster {
 
@@ -40,12 +41,14 @@ public:
         ss::sharded<cluster::metadata_cache>&,
         ss::sharded<rpc::connection_cache>&,
         ss::sharded<partition_leaders_table>&,
-        std::unique_ptr<cluster::controller>&);
+        std::unique_ptr<cluster::controller>&,
+        ss::sharded<cluster::id_allocator_frontend>&);
 
     ss::future<std::optional<model::node_id>> get_tx_broker(ss::sstring);
     ss::future<abort_tx_reply> abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> prepare_tx(model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_tx_reply> commit_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
+    ss::future<init_tm_tx_reply> init_tm_tx(kafka::transactional_id, model::timeout_clock::duration);
 
 private:
     [[maybe_unused]] ss::smp_service_group _ssg;
@@ -55,6 +58,7 @@ private:
     [[maybe_unused]] ss::sharded<rpc::connection_cache>& _connection_cache;
     [[maybe_unused]] ss::sharded<partition_leaders_table>& _leaders;
     [[maybe_unused]] std::unique_ptr<cluster::controller>& _controller;
+    ss::sharded<cluster::id_allocator_frontend>& _id_allocator_frontend;
 
     ss::future<bool> try_create_tx_topic();
     ss::future<abort_tx_reply> dispatch_abort_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
@@ -63,6 +67,8 @@ private:
     ss::future<prepare_tx_reply> do_prepare_tx(model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_tx_reply> dispatch_commit_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_tx_reply> do_commit_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
+    ss::future<cluster::init_tm_tx_reply> dispatch_init_tm_tx(model::node_id, kafka::transactional_id, model::timeout_clock::duration);
+    ss::future<cluster::init_tm_tx_reply> do_init_tm_tx(kafka::transactional_id, model::timeout_clock::duration);
 
     friend tx_gateway;
 };
