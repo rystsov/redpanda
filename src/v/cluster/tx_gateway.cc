@@ -13,6 +13,7 @@
 #include "cluster/types.h"
 #include "model/namespace.h"
 #include "model/record_batch_reader.h"
+#include "cluster/tx_gateway_frontend.h"
 
 #include <seastar/core/sharded.hh>
 
@@ -20,8 +21,10 @@ namespace cluster {
 
 tx_gateway::tx_gateway(
   ss::scheduling_group sg,
-  ss::smp_service_group ssg)
-  : tx_gateway_service(sg, ssg) {}
+  ss::smp_service_group ssg,
+  ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend)
+  : tx_gateway_service(sg, ssg)
+  , _tx_gateway_frontend(tx_gateway_frontend) {}
 
 ss::future<init_tm_tx_reply>
 tx_gateway::init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) {
