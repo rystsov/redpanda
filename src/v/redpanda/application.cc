@@ -523,7 +523,12 @@ void application::wire_up_services() {
     syschecks::systemd_message("Creating tx coordinator frontend").get();
     construct_service(
       tx_gateway_frontend,
+      smp_service_groups.raft_smp_sg(),
+      std::ref(partition_manager),
+      std::ref(shard_table),
       std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
       std::ref(controller))
       .get();
 
