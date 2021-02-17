@@ -43,6 +43,6 @@ public:
     ping_tm(ping_tm_request&&, rpc::streaming_context&) final;
 
 private:
-    [[maybe_unused]] ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
+    ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
 };
 }

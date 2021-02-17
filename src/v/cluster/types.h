@@ -90,8 +90,14 @@ struct prepare_tx_request { };
 struct prepare_tx_reply { };
 struct commit_tx_request { };
 struct commit_tx_reply { };
-struct abort_tx_request { };
-struct abort_tx_reply { };
+struct abort_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::timeout_clock::duration timeout;
+};
+struct abort_tx_reply {
+    tx_errc ec;
+};
 struct ping_tm_request { };
 struct ping_tm_reply { };
 

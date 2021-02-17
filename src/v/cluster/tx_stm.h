@@ -50,6 +50,8 @@ public:
     ss::future<> make_snapshot() final;
     ss::future<> catchup();
 
+    ss::future<> abort_tx(model::producer_identity, model::timeout_clock::time_point);
+
     ss::future<checked<raft::replicate_result, kafka::error_code>> replicate(
       model::batch_identity,
       model::record_batch_reader&&,
