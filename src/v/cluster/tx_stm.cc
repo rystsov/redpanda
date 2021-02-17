@@ -201,6 +201,11 @@ tx_stm::prepare_tx([[maybe_unused]] model::term_id etag, [[maybe_unused]] model:
     return ss::now();
 }
 
+ss::future<>
+tx_stm::commit_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    return ss::now();
+}
+
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
   [[maybe_unused]] model::batch_identity bid,
