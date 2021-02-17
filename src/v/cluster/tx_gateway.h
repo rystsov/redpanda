@@ -21,7 +21,8 @@ class tx_gateway final : public tx_gateway_service {
 public:
     tx_gateway(
       ss::scheduling_group,
-      ss::smp_service_group);
+      ss::smp_service_group,
+      ss::sharded<cluster::tx_gateway_frontend>&);
 
     virtual ss::future<init_tm_tx_reply>
     init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) final;
@@ -40,5 +41,8 @@ public:
 
     virtual ss::future<ping_tm_reply>
     ping_tm(ping_tm_request&&, rpc::streaming_context&) final;
+
+private:
+    [[maybe_unused]] ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
 };
 }

@@ -597,7 +597,8 @@ void application::start() {
             std::ref(id_allocator_frontend));
           proto->register_service<cluster::tx_gateway>(
             _scheduling_groups.raft_sg(),
-            smp_service_groups.raft_smp_sg());
+            smp_service_groups.raft_smp_sg(),
+            std::ref(tx_gateway_frontend));
           proto->register_service<
             raft::service<cluster::partition_manager, cluster::shard_table>>(
             _scheduling_groups.raft_sg(),
