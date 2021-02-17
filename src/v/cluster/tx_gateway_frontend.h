@@ -14,6 +14,7 @@
 #include "config/configuration.h"
 #include "cluster/controller.h"
 #include "cluster/topics_frontend.h"
+#include "cluster/types.h"
 #include "kafka/types.h"
 #include "kafka/protocol/errors.h"
 #include "model/metadata.h"
@@ -32,14 +33,24 @@ struct tx_coordinator_address {
 class tx_gateway_frontend {
 public:
     tx_gateway_frontend(
+        ss::smp_service_group,
+        ss::sharded<cluster::partition_manager>&,
+        ss::sharded<cluster::shard_table>&,
         ss::sharded<cluster::metadata_cache>&,
+        ss::sharded<rpc::connection_cache>&,
+        ss::sharded<partition_leaders_table>&,
         std::unique_ptr<cluster::controller>&);
 
     ss::future<std::optional<model::node_id>> get_tx_broker(ss::sstring);
 
 private:
-    ss::sharded<cluster::metadata_cache>& _metadata_cache;
-    std::unique_ptr<cluster::controller>& _controller;
+    [[maybe_unused]] ss::smp_service_group _ssg;
+    [[maybe_unused]] ss::sharded<cluster::partition_manager>& _partition_manager;
+    [[maybe_unused]] ss::sharded<cluster::shard_table>& _shard_table;
+    [[maybe_unused]] ss::sharded<cluster::metadata_cache>& _metadata_cache;
+    [[maybe_unused]] ss::sharded<rpc::connection_cache>& _connection_cache;
+    [[maybe_unused]] ss::sharded<partition_leaders_table>& _leaders;
+    [[maybe_unused]] std::unique_ptr<cluster::controller>& _controller;
 
     ss::future<bool> try_create_tx_topic();
 };
