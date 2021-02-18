@@ -72,6 +72,7 @@ private:
 
     ss::future<checked<cluster::tm_transaction, tx_errc>> abort_tm_tx(ss::shared_ptr<cluster::tm_stm>&, cluster::tm_transaction, model::timeout_clock::duration, ss::lw_shared_ptr<ss::promise<tx_errc>>);
     ss::future<checked<cluster::tm_transaction, tx_errc>> commit_tm_tx(ss::shared_ptr<cluster::tm_stm>&, cluster::tm_transaction, model::timeout_clock::duration, ss::lw_shared_ptr<ss::promise<tx_errc>>);
+    ss::future<checked<tm_transaction, tx_errc>> recommit_tm_tx(ss::shared_ptr<tm_stm>&, tm_transaction, model::timeout_clock::duration);
 
     friend tx_gateway;
 };
