@@ -71,6 +71,7 @@ private:
     ss::future<cluster::init_tm_tx_reply> do_init_tm_tx(kafka::transactional_id, model::timeout_clock::duration);
 
     ss::future<checked<cluster::tm_transaction, tx_errc>> abort_tm_tx(ss::shared_ptr<cluster::tm_stm>&, cluster::tm_transaction, model::timeout_clock::duration, ss::lw_shared_ptr<ss::promise<tx_errc>>);
+    ss::future<checked<cluster::tm_transaction, tx_errc>> commit_tm_tx(ss::shared_ptr<cluster::tm_stm>&, cluster::tm_transaction, model::timeout_clock::duration, ss::lw_shared_ptr<ss::promise<tx_errc>>);
 
     friend tx_gateway;
 };

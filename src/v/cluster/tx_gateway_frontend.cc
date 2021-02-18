@@ -467,6 +467,8 @@ tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout
 
               if (tx.status == tm_transaction::tx_status::ongoing) {
                   f = abort_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
+              } else if (tx.status == tm_transaction::tx_status::preparing) {
+                  f = commit_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
               }
 
               return f.then([&stm](checked<tm_transaction, tx_errc> r){
@@ -553,6 +555,59 @@ tx_gateway_frontend::abort_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::
         co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
     }
     co_return checked<cluster::tm_transaction, tx_errc>(tx);
+}
+
+ss::future<checked<cluster::tm_transaction, tx_errc>>
+tx_gateway_frontend::commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::tm_transaction tx, model::timeout_clock::duration timeout, ss::lw_shared_ptr<ss::promise<tx_errc>> outcome) {
+    std::vector<ss::future<prepare_tx_reply>> pfs;
+    for (auto rm : tx.partitions) {
+        pfs.push_back(prepare_tx(rm.ntp, rm.etag, tx.pid, timeout));
+    }
+
+    if (tx.status == tm_transaction::tx_status::ongoing) {
+        auto became_preparing_tx = co_await stm->try_change_status(tx.id, tx.etag, cluster::tm_transaction::tx_status::preparing);
+        if (!became_preparing_tx.has_value()) {
+            // todo: use sane errors
+            outcome->set_value(tx_errc::timeout);
+            co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+        }
+        tx = became_preparing_tx.value();
+    }
+    
+    auto prs = co_await when_all_succeed(pfs.begin(), pfs.end());
+    bool ok = true;
+    for (auto r : prs) {
+        // TODO: support partition removal, maybe treat it as success?
+        // TODO: handle etag violations => abort
+        ok = ok && (r.ec == tx_errc::success);
+    }
+    if (!ok) {
+        // todo: use sane errors
+        outcome->set_value(tx_errc::timeout);
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    }
+    outcome->set_value(tx_errc::success);
+    
+    auto changed_tx = co_await stm->try_change_status(tx.id, tx.etag, cluster::tm_transaction::tx_status::prepared);
+    if (!changed_tx.has_value()) {
+        // todo support other error types
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    }
+    tx = changed_tx.value();
+
+    std::vector<ss::future<commit_tx_reply>> cfs;
+    for (auto rm : tx.partitions) {
+        cfs.push_back(commit_tx(rm.ntp, tx.pid, timeout));
+    }
+    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
+    ok = true;
+    for (auto r : crs) {
+        ok = ok && (r.ec == tx_errc::success);
+    }
+    if (ok) {
+        co_return checked<cluster::tm_transaction, tx_errc>(tx);
+    }
+    co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
 }
 
 ss::future<bool>
