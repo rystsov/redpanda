@@ -469,6 +469,8 @@ tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout
                   f = abort_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
               } else if (tx.status == tm_transaction::tx_status::preparing) {
                   f = commit_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
+              } else if (tx.status == tm_transaction::tx_status::prepared) {
+                  f = recommit_tm_tx(stm, tx, timeout);
               }
 
               return f.then([&stm](checked<tm_transaction, tx_errc> r){
@@ -609,6 +611,25 @@ tx_gateway_frontend::commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster:
     }
     co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
 }
+
+ss::future<checked<tm_transaction, tx_errc>>
+tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, [[maybe_unused]] model::timeout_clock::duration timeout) {
+    std::vector<ss::future<commit_tx_reply>> cfs;
+    for (auto rm : tx.partitions) {
+        cfs.push_back(commit_tx(rm.ntp, tx.pid, timeout));
+    }
+    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
+    auto ok = true;
+    for (auto r : crs) {
+        ok = ok && (r.ec == tx_errc::success);
+    }
+    if (ok) {
+        co_return checked<tm_transaction, tx_errc>(tx);
+    }
+    co_return checked<tm_transaction, tx_errc>(tx_errc::timeout);
+}
+
+
 
 ss::future<bool>
 tx_gateway_frontend::try_create_tx_topic() {
