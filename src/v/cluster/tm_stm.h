@@ -13,6 +13,7 @@
 
 #include "config/configuration.h"
 #include "kafka/protocol/errors.h"
+#include "kafka/types.h"
 #include "model/fundamental.h"
 #include "model/record.h"
 #include "raft/consensus.h"
@@ -38,10 +39,38 @@ struct tm_snapshot_header {
                                                 + sizeof(snapshot_size);
 };
 
+struct tm_transaction {
+    enum tx_status {
+        ongoing,
+        preparing,
+        prepared,
+        aborting,
+        finished,
+    };
+
+    struct rm {
+        model::ntp ntp;
+        model::term_id etag;
+    };
+
+    kafka::transactional_id id;
+    tx_status status;
+    model::producer_identity pid;
+    std::vector<rm> partitions;
+    int64_t etag;
+};
+
 class tm_stm final
   : public raft::state_machine
   , public storage::snapshotable_stm {
 public:
+    enum op_status {
+        success,
+        not_found,
+        conflict,
+        unknown,
+    };
+
     explicit tm_stm(ss::logger&, raft::consensus*, config::configuration&);
 
     ss::future<> start() final;
@@ -49,6 +78,11 @@ public:
     ss::future<> ensure_snapshot_exists(model::offset) final;
     ss::future<> make_snapshot() final;
     ss::future<> catchup();
+
+    std::optional<tm_transaction> get_tx(kafka::transactional_id);
+    ss::future<checked<tm_transaction, tm_stm::op_status>> try_change_status(kafka::transactional_id, int64_t, tm_transaction::tx_status);
+    ss::future<tm_stm::op_status> re_register_producer(kafka::transactional_id, int64_t, model::producer_identity);
+    ss::future<tm_stm::op_status> register_new_producer(kafka::transactional_id, model::producer_identity);
 
 private:
     struct snapshot {

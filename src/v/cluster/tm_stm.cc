@@ -17,6 +17,7 @@
 #include <seastar/core/future.hh>
 
 #include <filesystem>
+#include <optional>
 
 namespace cluster {
 
@@ -189,6 +190,26 @@ ss::future<> tm_stm::catchup() {
         }
     }
     return ss::now();
+}
+
+std::optional<tm_transaction>
+tm_stm::get_tx([[maybe_unused]] kafka::transactional_id tx_id) {
+    return std::nullopt;
+}
+
+ss::future<checked<tm_transaction, tm_stm::op_status>>
+tm_stm::try_change_status([[maybe_unused]] kafka::transactional_id tx_id, [[maybe_unused]] int64_t etag, [[maybe_unused]] tm_transaction::tx_status status) {
+    return ss::make_ready_future<checked<tm_transaction, tm_stm::op_status>>(checked<tm_transaction, tm_stm::op_status>(tm_stm::op_status::not_found));
+}
+
+ss::future<tm_stm::op_status>
+tm_stm::re_register_producer([[maybe_unused]] kafka::transactional_id tx_id, [[maybe_unused]] int64_t etag, [[maybe_unused]] model::producer_identity pid) {
+    return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::unknown);
+}
+
+ss::future<tm_stm::op_status>
+tm_stm::register_new_producer([[maybe_unused]] kafka::transactional_id tx_id, [[maybe_unused]] model::producer_identity pid) {
+    return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::success);
 }
 
 ss::future<>
