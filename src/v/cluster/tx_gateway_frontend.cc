@@ -13,6 +13,7 @@
 #include "cluster/partition_manager.h"
 #include "cluster/tx_gateway_service.h"
 #include "cluster/id_allocator_frontend.h"
+#include <seastar/core/coroutine.hh>
 
 #include "cluster/logger.h"
 #include "errc.h"
@@ -464,6 +465,10 @@ tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout
 
               auto f = ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx);
 
+              if (tx.status == tm_transaction::tx_status::ongoing) {
+                  f = abort_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
+              }
+
               return f.then([&stm](checked<tm_transaction, tx_errc> r){
                   if (r.has_value()) {
                       auto tx = r.value();
@@ -491,7 +496,7 @@ tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout
                         .ec = tx_errc::timeout
                       }); 
                   }
-              });
+              });   
           } else {
               return _id_allocator_frontend.local().allocate_id(timeout).then([&stm, tx_id](allocate_id_reply pid_reply){
                   if (pid_reply.ec == errc::success) {
@@ -520,6 +525,34 @@ tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout
               });
           }
       });
+}
+
+ss::future<checked<cluster::tm_transaction, tx_errc>>
+tx_gateway_frontend::abort_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::tm_transaction tx, model::timeout_clock::duration timeout, ss::lw_shared_ptr<ss::promise<tx_errc>> outcome) {
+    auto changed_tx = co_await stm->try_change_status(tx.id, tx.etag, cluster::tm_transaction::tx_status::aborting);
+    if (!changed_tx.has_value()) {
+        // todo support other error types
+        outcome->set_value(tx_errc::timeout);
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    }
+    outcome->set_value(tx_errc::success);
+
+    tx = changed_tx.value();
+    std::vector<ss::future<abort_tx_reply>> fs;
+    for (auto rm : tx.partitions) {
+        fs.push_back(abort_tx(rm.ntp, tx.pid, timeout));
+    }
+    auto rs = co_await when_all_succeed(fs.begin(), fs.end());
+    bool ok = true;
+    for (auto r : rs) {
+        // TODO: support partition removal, maybe treat it as success?
+        ok = ok && (r.ec == tx_errc::success);
+    }
+    if (!ok) {
+        // todo: use sane errors
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    }
+    co_return checked<cluster::tm_transaction, tx_errc>(tx);
 }
 
 ss::future<bool>
