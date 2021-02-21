@@ -203,8 +203,18 @@ tm_stm::try_change_status([[maybe_unused]] kafka::transactional_id tx_id, [[mayb
 }
 
 ss::future<tm_stm::op_status>
-tm_stm::re_register_producer([[maybe_unused]] kafka::transactional_id tx_id, [[maybe_unused]] int64_t etag, [[maybe_unused]] model::producer_identity pid) {
-    return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::unknown);
+tm_stm::re_register_producer(kafka::transactional_id tx_id, int64_t etag, model::producer_identity pid) {
+    auto tx = _tx_table.find(tx_id);
+    if (tx == _tx_table.end()) {
+        return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::not_found);
+    }
+    if (tx->second.etag != etag) {
+        return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::conflict);
+    }
+    tx->second.status = tm_transaction::tx_status::ongoing;
+    tx->second.pid = pid;
+    tx->second.etag = etag+1;
+    return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::success);
 }
 
 ss::future<tm_stm::op_status>
