@@ -10,6 +10,7 @@
 #include "kafka/server/handlers/add_partitions_to_txn.h"
 
 #include "cluster/topics_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/logger.h"
@@ -28,29 +29,11 @@ ss::future<response_ptr> add_partitions_to_txn_handler::handle(
      return ss::do_with(std::move(ctx), [](request_context& ctx) {
         add_partitions_to_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-
-        /*
-            if transactionalId:
-                tx_gateway.init_tx(transactionalId)
-            else
-                pass
-        */
-
-
-        add_partitions_to_txn_response response;
-        for (auto& req_topic : request.data.topics) {
-            add_partitions_to_txn_topic_result res_topic;
-            res_topic.name = req_topic.name;
-            for (int32_t req_partition : req_topic.partitions) {
-                add_partitions_to_txn_partition_result res_partition;
-                res_partition.partition_index = req_partition;
-                res_partition.error_code = kafka::error_code::none;
-                res_topic.results.push_back(res_partition);
-            }
-            response.data.results.push_back(res_topic);
-        }
-
-        return ctx.respond(std::move(response));
+        return ctx.tx_gateway_frontend().add_partition_to_tx(request.data, config::shard_local_cfg().create_topic_timeout_ms()).then([&ctx](add_partitions_to_txn_response_data data) {
+            add_partitions_to_txn_response response;
+            response.data = data;
+            return ctx.respond(std::move(response));
+        });
      });
 }
 

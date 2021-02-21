@@ -650,6 +650,22 @@ tx_gateway_frontend::reabort_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction t
     co_return checked<tm_transaction, tx_errc>(tx_errc::timeout);
 }
 
+ss::future<kafka::add_partitions_to_txn_response_data>
+tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, [[maybe_unused]] model::timeout_clock::duration timeout) {
+    kafka::add_partitions_to_txn_response_data response;
+    for (auto& req_topic : request.topics) {
+        kafka::add_partitions_to_txn_topic_result res_topic;
+        res_topic.name = req_topic.name;
+        for (int32_t req_partition : req_topic.partitions) {
+            kafka::add_partitions_to_txn_partition_result res_partition;
+            res_partition.partition_index = req_partition;
+            res_partition.error_code = kafka::error_code::none;
+            res_topic.results.push_back(res_partition);
+        }
+        response.results.push_back(res_topic);
+    }
+    return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(response);
+}
 
 ss::future<bool>
 tx_gateway_frontend::try_create_tx_topic() {
