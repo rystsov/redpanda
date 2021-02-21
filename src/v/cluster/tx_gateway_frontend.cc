@@ -14,6 +14,7 @@
 #include "cluster/tx_gateway_service.h"
 #include "cluster/id_allocator_frontend.h"
 #include <seastar/core/coroutine.hh>
+#include <algorithm>
 
 #include "cluster/logger.h"
 #include "errc.h"
@@ -668,7 +669,7 @@ make_add_partitions_error_response(kafka::add_partitions_to_txn_request_data req
 }
 
 ss::future<kafka::add_partitions_to_txn_response_data>
-tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, [[maybe_unused]] model::timeout_clock::duration timeout) {
+tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, model::timeout_clock::duration timeout) {
     
     auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
 
@@ -680,7 +681,7 @@ tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_da
     }
 
     return _partition_manager.invoke_on(
-      *shard, _ssg, [request](cluster::partition_manager& mgr) mutable {
+      *shard, _ssg, [this, request, timeout](cluster::partition_manager& mgr) mutable {
           auto partition = mgr.get(model::kafka_tx_ntp);
           if (!partition) {
               vlog(clusterlog.warn, "can't get partition by {} ntp", model::kafka_tx_ntp);
@@ -697,19 +698,92 @@ tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_da
                   make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
           }
 
+          auto maybe_tx = stm->get_tx(request.transactional_id);
+          if (!maybe_tx) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
+                  make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
+          }
+
+          auto tx = maybe_tx.value();
+          if (tx.status != tm_transaction::tx_status::ongoing) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
+                  make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
+          }
+
+          model::producer_identity pid {
+              .id = request.producer_id,
+              .epoch = request.producer_epoch
+          };
+          if (tx.pid != pid) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
+                  make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
+          }
+
+          std::vector<ss::future<begin_tx_reply>> bfs;
+          
           kafka::add_partitions_to_txn_response_data response;
           for (auto& req_topic : request.topics) {
               kafka::add_partitions_to_txn_topic_result res_topic;
               res_topic.name = req_topic.name;
+
+              model::topic topic(req_topic.name);
+
               for (int32_t req_partition : req_topic.partitions) {
-                  kafka::add_partitions_to_txn_partition_result res_partition;
-                  res_partition.partition_index = req_partition;
-                  res_partition.error_code = kafka::error_code::none;
-                  res_topic.results.push_back(res_partition);
+                  model::ntp ntp(model::kafka_namespace,topic, model::partition_id(req_partition));
+                  auto has_ntp = std::any_of(tx.partitions.begin(), tx.partitions.end(), [ntp](const auto& rm) {
+                      return rm.ntp == ntp;
+                  });
+                  if (has_ntp) {
+                      kafka::add_partitions_to_txn_partition_result res_partition;
+                      res_partition.partition_index = req_partition;
+                      // todo: use sane error code
+                      res_partition.error_code = kafka::error_code::unknown_server_error;
+                      res_topic.results.push_back(res_partition);
+                  } else {
+                      bfs.push_back(begin_tx(ntp, timeout));
+                  }
               }
               response.results.push_back(res_topic);
           }
-          return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(response);
+
+          return when_all_succeed(bfs.begin(), bfs.end()).then([response, tx, &stm](std::vector<begin_tx_reply> brs) mutable {
+              std::vector<tm_transaction::rm> partitions;
+              for (auto& br : brs) {
+                  auto topic_it = std::find_if(response.results.begin(), response.results.end(), [&br](const auto& r) {
+                      return r.name == br.ntp.tp.topic();
+                  });
+                  vassert(topic_it != response.results.end(), "can't find expected topic {}", br.ntp.tp.topic());
+                  vassert(std::none_of(topic_it->results.begin(), topic_it->results.end(), [&br](const auto& r) { 
+                      return r.partition_index == br.ntp.tp.partition();
+                  }), "partition {} is already part of the response", br.ntp.tp.partition());
+                  if (br.ec == tx_errc::success) {
+                      partitions.push_back(tm_transaction::rm {
+                          .ntp = br.ntp,
+                          .etag = br.etag
+                      });
+                  }
+              }
+              auto has_added = stm->add_partitions(tx.id, tx.etag, partitions);
+              for (auto& br : brs) {
+                  auto topic_it = std::find_if(response.results.begin(), response.results.end(), [&br](const auto& r) {
+                      return r.name == br.ntp.tp.topic();
+                  });
+                  
+                  kafka::add_partitions_to_txn_partition_result res_partition;
+                  res_partition.partition_index = br.ntp.tp.partition();
+                  if (has_added && br.ec == tx_errc::success) {
+                      res_partition.error_code = kafka::error_code::none;
+                  } else {
+                      // todo: use sane error code
+                      res_partition.error_code = kafka::error_code::unknown_server_error;
+                  }
+                  topic_it->results.push_back(res_partition);
+              }
+              return response;
+          });
       });
 }
 
