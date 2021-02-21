@@ -650,8 +650,8 @@ tx_gateway_frontend::reabort_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction t
     co_return checked<tm_transaction, tx_errc>(tx_errc::timeout);
 }
 
-ss::future<kafka::add_partitions_to_txn_response_data>
-tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, [[maybe_unused]] model::timeout_clock::duration timeout) {
+static kafka::add_partitions_to_txn_response_data
+make_add_partitions_error_response(kafka::add_partitions_to_txn_request_data request, kafka::error_code ec) {
     kafka::add_partitions_to_txn_response_data response;
     for (auto& req_topic : request.topics) {
         kafka::add_partitions_to_txn_topic_result res_topic;
@@ -659,12 +659,58 @@ tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_da
         for (int32_t req_partition : req_topic.partitions) {
             kafka::add_partitions_to_txn_partition_result res_partition;
             res_partition.partition_index = req_partition;
-            res_partition.error_code = kafka::error_code::none;
+            res_partition.error_code = ec;
             res_topic.results.push_back(res_partition);
         }
         response.results.push_back(res_topic);
     }
-    return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(response);
+    return response;
+}
+
+ss::future<kafka::add_partitions_to_txn_response_data>
+tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, [[maybe_unused]] model::timeout_clock::duration timeout) {
+    
+    auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", model::kafka_tx_ntp);
+        // todo: use sane error code
+        return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
+            make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [request](cluster::partition_manager& mgr) mutable {
+          auto partition = mgr.get(model::kafka_tx_ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", model::kafka_tx_ntp);
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
+                  make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
+          }
+
+          auto& stm = partition->tm_stm();
+          
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tm stm of the {}' partition", model::kafka_tx_ntp);
+              return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
+                  make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
+          }
+
+          kafka::add_partitions_to_txn_response_data response;
+          for (auto& req_topic : request.topics) {
+              kafka::add_partitions_to_txn_topic_result res_topic;
+              res_topic.name = req_topic.name;
+              for (int32_t req_partition : req_topic.partitions) {
+                  kafka::add_partitions_to_txn_partition_result res_partition;
+                  res_partition.partition_index = req_partition;
+                  res_partition.error_code = kafka::error_code::none;
+                  res_topic.results.push_back(res_partition);
+              }
+              response.results.push_back(res_topic);
+          }
+          return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(response);
+      });
 }
 
 ss::future<begin_tx_reply>
