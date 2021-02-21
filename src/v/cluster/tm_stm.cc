@@ -208,7 +208,18 @@ tm_stm::re_register_producer([[maybe_unused]] kafka::transactional_id tx_id, [[m
 }
 
 ss::future<tm_stm::op_status>
-tm_stm::register_new_producer([[maybe_unused]] kafka::transactional_id tx_id, [[maybe_unused]] model::producer_identity pid) {
+tm_stm::register_new_producer(kafka::transactional_id tx_id, model::producer_identity pid) {
+    auto tx = _tx_table.find(tx_id);
+    if (tx != _tx_table.end()) {
+        return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::conflict);
+    }
+    tm_transaction entry {
+        .id = tx_id,
+        .status = tm_transaction::tx_status::ongoing,
+        .pid = pid,
+        .etag = 0
+    };
+    _tx_table.emplace(entry.id, entry);
     return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::success);
 }
 

@@ -83,6 +83,7 @@ public:
     ss::future<checked<tm_transaction, tm_stm::op_status>> try_change_status(kafka::transactional_id, int64_t, tm_transaction::tx_status);
     ss::future<tm_stm::op_status> re_register_producer(kafka::transactional_id, int64_t, model::producer_identity);
     ss::future<tm_stm::op_status> register_new_producer(kafka::transactional_id, model::producer_identity);
+    bool add_partitions(kafka::transactional_id, int64_t, std::vector<tm_transaction::rm>);
 
 private:
     struct snapshot {
@@ -99,6 +100,7 @@ private:
     ss::future<> catchup(model::term_id, model::offset);
 
     model::offset _last_snapshot_offset;
+    absl::flat_hash_map<kafka::transactional_id, tm_transaction> _tx_table;
     mutex _op_lock;
     ss::shared_promise<> _resolved_when_snapshot_hydrated;
     bool _is_catching_up{false};
