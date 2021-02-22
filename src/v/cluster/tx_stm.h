@@ -53,6 +53,7 @@ public:
     ss::future<> abort_tx(model::producer_identity, model::timeout_clock::time_point);
     ss::future<> prepare_tx(model::term_id, model::producer_identity, model::timeout_clock::time_point);
     ss::future<> commit_tx(model::producer_identity, model::timeout_clock::time_point);
+    std::optional<model::term_id> begin_tx();
 
     ss::future<checked<raft::replicate_result, kafka::error_code>> replicate(
       model::batch_identity,

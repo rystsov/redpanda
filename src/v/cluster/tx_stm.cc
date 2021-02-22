@@ -206,6 +206,14 @@ tx_stm::commit_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]
     return ss::now();
 }
 
+std::optional<model::term_id>
+tx_stm::begin_tx() {
+    if (_c->is_leader()) {
+        return std::optional<model::term_id>(_insync_term);
+    }
+    return std::nullopt;
+}
+
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
   [[maybe_unused]] model::batch_identity bid,
