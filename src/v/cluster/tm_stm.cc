@@ -243,6 +243,22 @@ tm_stm::register_new_producer(kafka::transactional_id tx_id, model::producer_ide
     return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::success);
 }
 
+bool
+tm_stm::add_partitions(kafka::transactional_id tx_id, int64_t etag, std::vector<tm_transaction::rm> partitions) {
+    auto tx = _tx_table.find(tx_id);
+    if (tx == _tx_table.end()) {
+        return false;
+    }
+    if (tx->second.etag != etag) {
+        return false;
+    }
+    tx->second.etag += 1;
+    for (auto& partition : partitions) {
+        tx->second.partitions.push_back(partition);
+    }
+    return true;
+}
+
 ss::future<>
 tm_stm::catchup(model::term_id last_term, model::offset last_offset) {
     vlog(

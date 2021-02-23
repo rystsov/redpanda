@@ -56,6 +56,7 @@ struct tm_transaction {
     kafka::transactional_id id;
     tx_status status;
     model::producer_identity pid;
+    // TODO: make an ntp map 
     std::vector<rm> partitions;
     int64_t etag;
 };
