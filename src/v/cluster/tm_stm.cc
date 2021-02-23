@@ -193,7 +193,11 @@ ss::future<> tm_stm::catchup() {
 }
 
 std::optional<tm_transaction>
-tm_stm::get_tx([[maybe_unused]] kafka::transactional_id tx_id) {
+tm_stm::get_tx(kafka::transactional_id tx_id) {
+    auto tx = _tx_table.find(tx_id);
+    if (tx != _tx_table.end()) {
+        return std::optional<tm_transaction>(tx->second);
+    }
     return std::nullopt;
 }
 
