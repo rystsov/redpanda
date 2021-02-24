@@ -897,6 +897,87 @@ tx_gateway_frontend::do_begin_tx(model::ntp ntp) {
       });
 }
 
+ss::future<kafka::end_txn_response_data>
+tx_gateway_frontend::end_txn(kafka::end_txn_request_data request, model::timeout_clock::duration timeout) {
+    auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", model::kafka_tx_ntp);
+        // todo: use sane error code
+        return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+            .error_code = kafka::error_code::unknown_server_error
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [this, request, timeout](cluster::partition_manager& mgr) mutable {
+          auto partition = mgr.get(model::kafka_tx_ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", model::kafka_tx_ntp);
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          auto& stm = partition->tm_stm();
+          
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tm stm of the {}' partition", model::kafka_tx_ntp);
+              return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          auto maybe_tx = stm->get_tx(request.transactional_id);
+          if (!maybe_tx) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          auto tx = maybe_tx.value();
+          if (tx.status != tm_transaction::tx_status::ongoing) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          model::producer_identity pid {
+              .id = request.producer_id,
+              .epoch = request.producer_epoch
+          };
+          if (tx.pid != pid) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          // todo: use expiring promise
+          auto outcome = ss::make_lw_shared<ss::promise<tx_errc>>();
+          if (request.committed) {    
+              (void)commit_tm_tx(stm, tx, timeout, outcome);
+          } else {
+              (void)abort_tm_tx(stm, tx, timeout, outcome);
+          }
+
+          return outcome->get_future().then([](tx_errc ec) {
+              if (ec == tx_errc::success) {
+                  return kafka::end_txn_response_data {
+                    .error_code = kafka::error_code::none
+                  };
+              }
+
+              return kafka::end_txn_response_data {
+                .error_code = kafka::error_code::unknown_server_error
+              };
+          });
+      });
+}
+
 ss::future<bool>
 tx_gateway_frontend::try_create_tx_topic() {
     cluster::topic_configuration topic{

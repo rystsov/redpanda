@@ -23,6 +23,7 @@
 #include "cluster/tx_gateway.h"
 #include "cluster/tm_stm.h"
 #include "kafka/protocol/add_partitions_to_txn.h"
+#include "kafka/protocol/end_txn.h"
 
 namespace cluster {
 
@@ -52,6 +53,7 @@ public:
     ss::future<init_tm_tx_reply> init_tm_tx(kafka::transactional_id, model::timeout_clock::duration);
     ss::future<kafka::add_partitions_to_txn_response_data> add_partition_to_tx(kafka::add_partitions_to_txn_request_data, model::timeout_clock::duration);
     ss::future<begin_tx_reply> begin_tx(model::ntp, model::timeout_clock::duration);
+    ss::future<kafka::end_txn_response_data> end_txn(kafka::end_txn_request_data, model::timeout_clock::duration);
 
 private:
     [[maybe_unused]] ss::smp_service_group _ssg;
