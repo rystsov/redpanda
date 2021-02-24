@@ -198,8 +198,18 @@ tm_stm::get_tx([[maybe_unused]] kafka::transactional_id tx_id) {
 }
 
 ss::future<checked<tm_transaction, tm_stm::op_status>>
-tm_stm::try_change_status([[maybe_unused]] kafka::transactional_id tx_id, [[maybe_unused]] int64_t etag, [[maybe_unused]] tm_transaction::tx_status status) {
-    return ss::make_ready_future<checked<tm_transaction, tm_stm::op_status>>(checked<tm_transaction, tm_stm::op_status>(tm_stm::op_status::not_found));
+tm_stm::try_change_status(kafka::transactional_id tx_id, int64_t etag, tm_transaction::tx_status status) {
+    auto tx = _tx_table.find(tx_id);
+    if (tx == _tx_table.end()) {
+        return ss::make_ready_future<checked<tm_transaction, tm_stm::op_status>>(checked<tm_transaction, tm_stm::op_status>(tm_stm::op_status::not_found));
+    }
+    if (tx->second.etag != etag) {
+        return ss::make_ready_future<checked<tm_transaction, tm_stm::op_status>>(checked<tm_transaction, tm_stm::op_status>(tm_stm::op_status::conflict));
+    }
+    tx->second.status = status;
+    tx->second.etag = etag+1;
+    
+    return ss::make_ready_future<checked<tm_transaction, tm_stm::op_status>>(checked<tm_transaction, tm_stm::op_status>(tx->second));
 }
 
 ss::future<tm_stm::op_status>
