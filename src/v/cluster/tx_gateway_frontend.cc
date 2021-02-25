@@ -568,6 +568,11 @@ tx_gateway_frontend::abort_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::
         // todo: use sane errors
         co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
     }
+    changed_tx = stm->mark_tx_finished(tx.id, tx.etag);
+    if (!changed_tx.has_value()) {
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    }
+    tx = changed_tx.value();
     co_return checked<cluster::tm_transaction, tx_errc>(tx);
 }
 
