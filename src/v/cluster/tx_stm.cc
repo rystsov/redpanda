@@ -10,9 +10,12 @@
 #include "cluster/tx_stm.h"
 
 #include "raft/errc.h"
+#include "kafka/protocol/response_writer.h"
 #include "cluster/logger.h"
 #include "raft/types.h"
 #include "storage/record_batch_builder.h"
+#include "storage/parser_utils.h"
+#include "model/record.h"
 
 #include <seastar/core/future.hh>
 
@@ -191,9 +194,76 @@ ss::future<> tx_stm::catchup() {
     return ss::now();
 }
 
-ss::future<>
+static iobuf make_control_record_key(model::control_record_type crt) {
+    iobuf b;
+    kafka::response_writer w(b);
+    w.write(model::current_control_record_version);
+    w.write(crt);
+    return b;
+}
+
+static model::record make_control_record(model::control_record_type crt) {
+    int index = 0;
+    static constexpr size_t zero_vint_size = vint::vint_size(0);
+    auto k = make_control_record_key(crt);
+    auto k_z = k.size_bytes();
+    auto size = sizeof(model::record_attributes::type) // attributes
+                + vint::vint_size(0)                   // timestamp delta
+                + vint::vint_size(0)                   // offset delta
+                + vint::vint_size(k_z)                 // key size
+                + k.size_bytes()                       // key payload
+                + zero_vint_size                       // value size
+                + zero_vint_size;                      // headers size
+    return model::record(
+      size,
+      model::record_attributes(0),
+      index,
+      index,
+      k_z,
+      std::move(k),
+      0,
+      iobuf{},
+      std::vector<model::record_header>{});
+}
+
+static model::record_batch make_control_record_batch(model::producer_identity pid, model::control_record_type crt) {
+    auto ts = model::timestamp::now()();
+    auto header = model::record_batch_header{
+      .size_bytes = 0, // computed later
+      .base_offset = model::offset(0), // ?
+      .type = raft::data_batch_type,
+      .crc = 0, // we-reassign later
+      .attrs = model::record_batch_attributes(model::record_batch_attributes::control_mask),
+      .last_offset_delta = 0,
+      .first_timestamp = model::timestamp(ts),
+      .max_timestamp = model::timestamp(ts),
+      .producer_id = pid.id,
+      .producer_epoch = pid.epoch,
+      .base_sequence = 0,
+      .record_count = 1};
+    
+    iobuf records;
+    model::append_record_to_buffer(
+        records,
+        make_control_record(crt));
+    storage::internal::reset_size_checksum_metadata(header, records);
+    return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
+}
+
+ss::future<tx_errc>
 tx_stm::abort_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    return ss::now();
+    auto batch = make_control_record_batch(pid, model::control_record_type::tx_abort);
+
+    vlog(clusterlog.info, "aborting tx");
+    return _c->replicate(
+        model::make_memory_record_batch_reader(std::move(batch)),
+        raft::replicate_options(raft::consistency_level::quorum_ack))
+      .then([](result<raft::replicate_result> r) {
+          if (r) {
+              return tx_errc::success;
+          }
+          return tx_errc::timeout;
+      });
 }
 
 ss::future<>
@@ -201,9 +271,20 @@ tx_stm::prepare_tx([[maybe_unused]] model::term_id etag, [[maybe_unused]] model:
     return ss::now();
 }
 
-ss::future<>
-tx_stm::commit_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    return ss::now();
+ss::future<tx_errc>
+tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    auto batch = make_control_record_batch(pid, model::control_record_type::tx_commit);
+
+    vlog(clusterlog.info, "comitting tx");
+    return _c->replicate(
+        model::make_memory_record_batch_reader(std::move(batch)),
+        raft::replicate_options(raft::consistency_level::quorum_ack))
+      .then([](result<raft::replicate_result> r) {
+          if (r) {
+              return tx_errc::success;
+          }
+          return tx_errc::timeout;
+      });
 }
 
 std::optional<model::term_id>
@@ -218,9 +299,9 @@ ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
   [[maybe_unused]] model::batch_identity bid,
   model::record_batch_reader&& r,
-  raft::replicate_options opts) {
+  [[maybe_unused]] raft::replicate_options opts) {
     vlog(clusterlog.info, "tx replicating");
-    return _c->replicate(std::move(r), std::move(opts))
+    return _c->replicate(std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
       .then([](result<raft::replicate_result> r) {
           if (r) {
               return checked<raft::replicate_result, kafka::error_code>(r.value());

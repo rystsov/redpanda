@@ -264,8 +264,10 @@ tx_gateway_frontend::do_commit_tx(model::ntp ntp, model::producer_identity pid, 
           }
 
           // ok, tx not found, timeout
-          return stm->commit_tx(pid, model::timeout_clock::now() + timeout).then([](){
-              return commit_tx_reply();
+          return stm->commit_tx(pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
+              return commit_tx_reply {
+                  .ec = ec
+              };
           });
       });
 }
@@ -363,8 +365,10 @@ tx_gateway_frontend::do_abort_tx(model::ntp ntp, model::producer_identity pid, m
           }
 
           // ok, tx not found, timeout
-          return stm->abort_tx(pid, model::timeout_clock::now() + timeout).then([](){
-              return cluster::abort_tx_reply();
+          return stm->abort_tx(pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
+              return cluster::abort_tx_reply {
+                  .ec = ec
+              };
           });
       });
 }
