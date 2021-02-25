@@ -165,8 +165,10 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
           }
 
           // ok, tx not found, timeout
-          return stm->prepare_tx(etag, pid, model::timeout_clock::now() + timeout).then([](){
-              return prepare_tx_reply();
+          return stm->prepare_tx(etag, pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
+              return prepare_tx_reply {
+                  .ec = ec
+              };
           });
       });
 }

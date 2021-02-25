@@ -266,9 +266,16 @@ tx_stm::abort_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]]
       });
 }
 
-ss::future<>
-tx_stm::prepare_tx([[maybe_unused]] model::term_id etag, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    return ss::now();
+ss::future<tx_errc>
+tx_stm::prepare_tx(model::term_id etag, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    if (!_c->is_leader()) {
+        return ss::make_ready_future<tx_errc>(tx_errc::conflict);
+    }
+    if (_insync_term != etag) {
+        return ss::make_ready_future<tx_errc>(tx_errc::conflict);
+    }
+    
+    return ss::make_ready_future<tx_errc>(tx_errc::success);
 }
 
 ss::future<tx_errc>
