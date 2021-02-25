@@ -216,6 +216,21 @@ tm_stm::try_change_status(kafka::transactional_id tx_id, int64_t etag, tm_transa
     return ss::make_ready_future<checked<tm_transaction, tm_stm::op_status>>(checked<tm_transaction, tm_stm::op_status>(tx->second));
 }
 
+checked<tm_transaction, tm_stm::op_status>
+tm_stm::mark_tx_finished(kafka::transactional_id tx_id, int64_t etag) {
+    auto tx = _tx_table.find(tx_id);
+    if (tx == _tx_table.end()) {
+        return checked<tm_transaction, tm_stm::op_status>(tm_stm::op_status::not_found);
+    }
+    if (tx->second.etag != etag) {
+        return checked<tm_transaction, tm_stm::op_status>(tm_stm::op_status::conflict);
+    }
+    tx->second.status = tm_transaction::tx_status::finished;
+    tx->second.etag = etag+1;
+    tx->second.partitions = std::vector<tm_transaction::rm>();
+    return checked<tm_transaction, tm_stm::op_status>(tx->second);
+}
+
 ss::future<tm_stm::op_status>
 tm_stm::re_register_producer(kafka::transactional_id tx_id, int64_t etag, model::producer_identity pid) {
     auto tx = _tx_table.find(tx_id);
