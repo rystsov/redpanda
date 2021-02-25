@@ -104,6 +104,7 @@ struct begin_tx_reply {
 struct prepare_tx_request {
     model::ntp ntp;
     model::term_id etag;
+    model::partition_id tm;
     model::producer_identity pid;
     model::timeout_clock::duration timeout;
 };
