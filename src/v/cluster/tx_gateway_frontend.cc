@@ -618,10 +618,15 @@ tx_gateway_frontend::commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster:
     for (auto r : crs) {
         ok = ok && (r.ec == tx_errc::success);
     }
-    if (ok) {
-        co_return checked<cluster::tm_transaction, tx_errc>(tx);
+    if (!ok) {
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
     }
-    co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    changed_tx = stm->mark_tx_finished(tx.id, tx.etag);
+    if (!changed_tx.has_value()) {
+        co_return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+    }
+    tx = changed_tx.value();
+    co_return checked<cluster::tm_transaction, tx_errc>(tx);
 }
 
 ss::future<checked<tm_transaction, tx_errc>>
