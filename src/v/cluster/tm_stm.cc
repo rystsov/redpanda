@@ -228,6 +228,7 @@ tm_stm::re_register_producer(kafka::transactional_id tx_id, int64_t etag, model:
     tx->second.status = tm_transaction::tx_status::ongoing;
     tx->second.pid = pid;
     tx->second.etag = etag+1;
+    tx->second.partitions = std::vector<tm_transaction::rm>();
     return ss::make_ready_future<tm_stm::op_status>(tm_stm::op_status::success);
 }
 
