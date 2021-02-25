@@ -43,6 +43,8 @@ class tx_stm final
   : public raft::state_machine
   , public storage::snapshotable_stm {
 public:
+    static constexpr model::control_record_version prepare_control_record_version{0};
+    
     explicit tx_stm(ss::logger&, raft::consensus*, config::configuration&);
 
     ss::future<> start() final;

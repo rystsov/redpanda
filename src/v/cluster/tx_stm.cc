@@ -202,10 +202,17 @@ static iobuf make_control_record_key(model::control_record_type crt) {
     return b;
 }
 
-static model::record make_control_record(model::control_record_type crt) {
+static iobuf make_prepare_control_record_key(model::partition_id tm) {
+    iobuf b;
+    kafka::response_writer w(b);
+    w.write(tx_stm::prepare_control_record_version);
+    w.write(tm);
+    return b;
+}
+
+static model::record make_control_record(iobuf k) {
     int index = 0;
     static constexpr size_t zero_vint_size = vint::vint_size(0);
-    auto k = make_control_record_key(crt);
     auto k_z = k.size_bytes();
     auto size = sizeof(model::record_attributes::type) // attributes
                 + vint::vint_size(0)                   // timestamp delta
@@ -242,16 +249,42 @@ static model::record_batch make_control_record_batch(model::producer_identity pi
       .base_sequence = 0,
       .record_count = 1};
     
+    auto key = make_control_record_key(crt);
     iobuf records;
     model::append_record_to_buffer(
         records,
-        make_control_record(crt));
+        make_control_record(std::move(key)));
+    storage::internal::reset_size_checksum_metadata(header, records);
+    return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
+}
+
+static model::record_batch make_prepare_control_record_batch(model::producer_identity pid, model::partition_id tm) {
+    auto ts = model::timestamp::now()();
+    auto header = model::record_batch_header{
+      .size_bytes = 0, // computed later
+      .base_offset = model::offset(0), // ?
+      .type = tx_stm_prepare_batch_type,
+      .crc = 0, // we-reassign later
+      .attrs = model::record_batch_attributes(0),
+      .last_offset_delta = 0,
+      .first_timestamp = model::timestamp(ts),
+      .max_timestamp = model::timestamp(ts),
+      .producer_id = pid.id,
+      .producer_epoch = pid.epoch,
+      .base_sequence = 0,
+      .record_count = 1};
+    
+    auto key = make_prepare_control_record_key(tm);
+    iobuf records;
+    model::append_record_to_buffer(
+        records,
+        make_control_record(std::move(key)));
     storage::internal::reset_size_checksum_metadata(header, records);
     return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
 }
 
 ss::future<tx_errc>
-tx_stm::abort_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_abort);
 
     vlog(clusterlog.info, "aborting tx");
@@ -267,15 +300,25 @@ tx_stm::abort_tx([[maybe_unused]] model::producer_identity pid, [[maybe_unused]]
 }
 
 ss::future<tx_errc>
-tx_stm::prepare_tx(model::term_id etag, [[maybe_unused]] model::partition_id tm, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
     if (!_c->is_leader()) {
         return ss::make_ready_future<tx_errc>(tx_errc::conflict);
     }
     if (_insync_term != etag) {
         return ss::make_ready_future<tx_errc>(tx_errc::conflict);
     }
-    
-    return ss::make_ready_future<tx_errc>(tx_errc::success);
+
+    auto batch = make_prepare_control_record_batch(pid, tm);
+    return _c->replicate(
+        etag,
+        model::make_memory_record_batch_reader(std::move(batch)),
+        raft::replicate_options(raft::consistency_level::quorum_ack))
+      .then([](result<raft::replicate_result> r){
+          if (r) {
+              return tx_errc::success;
+          }
+          return tx_errc::timeout;
+      });
 }
 
 ss::future<tx_errc>
