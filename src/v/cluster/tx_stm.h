@@ -56,7 +56,7 @@ public:
     ss::future<tx_errc> abort_tx(model::producer_identity, model::timeout_clock::time_point);
     ss::future<tx_errc> prepare_tx(model::term_id, model::partition_id, model::producer_identity, model::timeout_clock::time_point);
     ss::future<tx_errc> commit_tx(model::producer_identity, model::timeout_clock::time_point);
-    std::optional<model::term_id> begin_tx();
+    std::optional<model::term_id> begin_tx(model::producer_identity);
 
     ss::future<checked<raft::replicate_result, kafka::error_code>> replicate(
       model::batch_identity,
@@ -77,8 +77,85 @@ private:
 
     ss::future<> catchup(model::term_id, model::offset);
 
+    ss::future<> apply(model::record_batch b) override;
+
     model::offset _last_snapshot_offset;
     mutex _op_lock;
+    
+    // track ongoing pids->[offsets]
+    // X: ordered set of pids offset
+    // get min of X
+    // on commit(pid) evict all pid's offset
+    // on abort(pid):
+    //   add [min,max] to aborted 
+    // todo replay
+
+    ////////////////////////////////////
+
+    absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
+
+    // {expected}:  map  pid -> term
+    // {estimated}: list [(pid,offset)]
+    // {ongoing}:   set  offset
+    //              map  pid->offset
+    // {prepared}:  set  pid
+    // {aborted}:   list [($pid, first, last)]
+
+    /*
+when begin(pid) comes:
+  [must be in-sync]
+  if $pid in {expected} set => error
+  put ($pid, term) to {expected} set
+
+when a tx record(pid) comes:
+  if $pid isn't in {expected} set:
+    error!
+  if $pid is in {ongoing} or {estimated}:
+    replicate with expected term!
+  else:
+    use insync offset and put ($pid, offset) to {estimated}
+    replicate with expected term!
+    if replication hasn't failed:
+      remove ($pid, *) from {estimated}
+      put correct ($pid, offset) to {ongoing}
+
+when prepare(pid, term) comes:
+  if $pid in {prepared} => reply ok
+  if $pid isn't in {expected} => error
+  replicate with $term!
+  if replication hasn't failed:
+    remove $pid from {expected}
+    put $pid to {prepared}
+
+when commit(pid) comes:
+  [must be in-sync]
+  if $pid isn't in {expected} and isn't in {prepared}:
+    // was already commited in the past
+    reply ok
+  if $pid isn't in {prepared}:
+    error
+  replicate with insync term!
+  if replication hasn't failed:
+    for ($pid, first) in {ongoing} or {estimated}:
+      evict!
+    remove $pid from {prepared}
+    remove $pid from {expected}
+
+when abort(pid) comes:
+  [must be in-sync]
+  if $pid isn't in {expected} and isn't in {prepared}:
+    // was already aborted in the past
+    reply ok
+  replicate with insync term!
+  if replication hasn't failed:
+    for ($pid, first) in {ongoing} or {estimated}:
+      evict!
+      put ($pid, first, offset) to {aborted}
+      remove $pid from {prepared}
+      remove $pid from {expected}
+
+    */
+    
     ss::shared_promise<> _resolved_when_snapshot_hydrated;
     bool _is_catching_up{false};
     model::term_id _insync_term{-1};
@@ -86,7 +163,6 @@ private:
     raft::consensus* _c;
     storage::snapshot_manager _snapshot_mgr;
     ss::logger& _log;
-    ss::future<> apply(model::record_batch b) override;
 };
 
 } // namespace raft

@@ -338,15 +338,19 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
 }
 
 std::optional<model::term_id>
-tx_stm::begin_tx() {
-    if (_c->is_leader()) {
-        if (_insync_term != _c->term()) {
-            (void)ss::with_gate(_gate, [this] { return catchup(); });
-            return std::nullopt;
-        }
-        return std::optional<model::term_id>(_insync_term);
+tx_stm::begin_tx(model::producer_identity pid) {
+    if (!_c->is_leader()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    if (_insync_term != _c->term()) {
+        (void)ss::with_gate(_gate, [this] { return catchup(); });
+        return std::nullopt;
+    }
+    if (_expected.find(pid) != _expected.end()) {
+        return std::nullopt;
+    }
+    _expected.emplace(pid, _insync_term);
+    return std::optional<model::term_id>(_insync_term);
 }
 
 ss::future<checked<raft::replicate_result, kafka::error_code>>
