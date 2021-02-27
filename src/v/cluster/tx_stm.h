@@ -135,11 +135,11 @@ when prepare(pid, term) comes:
 
 when commit(pid) comes:
   [must be in-sync]
-  if $pid isn't in {expected} and isn't in {prepared}:
+  if $pid in {expected}:
+    error
+  if $pid isn't in {prepared}:
     // was already commited in the past
     reply ok
-  if $pid isn't in {prepared}:
-    error
   replicate with insync term!
   if replication hasn't failed:
     for ($pid, first) in {ongoing} or {estimated}:

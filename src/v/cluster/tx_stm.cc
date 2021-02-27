@@ -335,14 +335,42 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
 
 ss::future<tx_errc>
 tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    if (!_c->is_leader()) {
+        // TODO: sane error
+        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    }
+    
+    if (_insync_term != _c->term()) {
+        (void)ss::with_gate(_gate, [this] { return catchup(); });
+        // TODO: sane error
+        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    }
+
+    if (_expected.contains(pid)) {
+        // TODO: sane error
+        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    }
+
+    if (!_prepared.contains(pid)) {
+        return ss::make_ready_future<tx_errc>(tx_errc::success);
+    }
+
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_commit);
 
     vlog(clusterlog.info, "comitting tx");
     return _c->replicate(
+        _insync_term,
         model::make_memory_record_batch_reader(std::move(batch)),
         raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([](result<raft::replicate_result> r) {
+      .then([this, pid](result<raft::replicate_result> r) {
           if (r) {
+              _prepared.erase(pid);
+              auto offset_it = _ongoing_map.find(pid);
+              if (offset_it == _ongoing_map.end()) {
+                  return tx_errc::success;
+              }
+              _ongoing_set.erase(offset_it->second);
+              _ongoing_map.erase(pid);
               return tx_errc::success;
           }
           return tx_errc::timeout;
