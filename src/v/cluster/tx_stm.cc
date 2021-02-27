@@ -285,14 +285,39 @@ static model::record_batch make_prepare_control_record_batch(model::producer_ide
 
 ss::future<tx_errc>
 tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    if (!_c->is_leader()) {
+        // TODO: sane error
+        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    }
+    
+    if (_insync_term != _c->term()) {
+        (void)ss::with_gate(_gate, [this] { return catchup(); });
+        // TODO: sane error
+        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    }
+
+    if (!_expected.contains(pid) && !_prepared.contains(pid)) {
+        return ss::make_ready_future<tx_errc>(tx_errc::success);
+    }
+    
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_abort);
 
     vlog(clusterlog.info, "aborting tx");
     return _c->replicate(
+        _insync_term,
         model::make_memory_record_batch_reader(std::move(batch)),
         raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([](result<raft::replicate_result> r) {
+      .then([pid, this](result<raft::replicate_result> r) {
           if (r) {
+              _prepared.erase(pid);
+              _expected.erase(pid);
+              auto offset_it = _ongoing_map.find(pid);
+              if (offset_it == _ongoing_map.end()) {
+                  return tx_errc::success;
+              }
+              _aborted.push_back(offset_it->second);
+              _ongoing_set.erase(offset_it->second.first);
+              _ongoing_map.erase(pid);
               return tx_errc::success;
           }
           return tx_errc::timeout;
@@ -369,7 +394,7 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
               if (offset_it == _ongoing_map.end()) {
                   return tx_errc::success;
               }
-              _ongoing_set.erase(offset_it->second);
+              _ongoing_set.erase(offset_it->second.first);
               _ongoing_map.erase(pid);
               return tx_errc::success;
           }
@@ -426,12 +451,20 @@ tx_stm::replicate(
 
     if (_ongoing_map.contains(bid.pid)) {
         return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
-            .then([](result<raft::replicate_result> r) {
-                if (r) {
-                    return checked<raft::replicate_result, kafka::error_code>(r.value());
+            .then([this, bid](result<raft::replicate_result> r) {
+                if (!r) {
+                    // TODO: check that failed replicate lead to aborted tx
+                    return checked<raft::replicate_result, kafka::error_code>(
+                        kafka::error_code::unknown_server_error);
                 }
-                return checked<raft::replicate_result, kafka::error_code>(
-                    kafka::error_code::unknown_server_error);
+                auto ongoing_it = _ongoing_map.find(bid.pid);
+                if (ongoing_it == _ongoing_map.end()) {
+                    return checked<raft::replicate_result, kafka::error_code>(
+                        kafka::error_code::unknown_server_error);
+                }
+                auto rr = r.value();
+                ongoing_it->second.last = model::offset(rr.last_offset());
+                return checked<raft::replicate_result, kafka::error_code>(rr);
             });
     }
 
@@ -441,7 +474,11 @@ tx_stm::replicate(
           if (r) {
               auto rr = r.value();
               auto base_offset = model::offset(rr.last_offset() - (bid.record_count - 1));
-              _ongoing_map.emplace(bid.pid, base_offset);
+              _ongoing_map.emplace(bid.pid, tx_range {
+                  .pid = bid.pid,
+                  .first = base_offset,
+                  .last = model::offset(rr.last_offset())
+              });
               _ongoing_set.insert(base_offset);
               _estimated.erase(bid.pid);
               return checked<raft::replicate_result, kafka::error_code>(r.value());

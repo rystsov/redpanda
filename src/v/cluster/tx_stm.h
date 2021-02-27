@@ -69,6 +69,12 @@ private:
         model::offset offset;
     };
 
+    struct tx_range {
+        model::producer_identity pid;
+        model::offset first;
+        model::offset last;
+    };
+
     ss::future<> do_make_snapshot();
     ss::future<> hydrate_snapshot(storage::snapshot_reader&);
 
@@ -95,9 +101,10 @@ private:
 
     absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
     absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
-    absl::flat_hash_map<model::producer_identity, model::offset> _ongoing_map;
+    absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;
     absl::flat_hash_map<model::producer_identity, model::term_id> _prepared;
+    std::vector<tx_range> _aborted;
 
 
     // {expected}:  map  pid -> term
