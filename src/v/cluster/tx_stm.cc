@@ -301,10 +301,20 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
 
 ss::future<tx_errc>
 tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    if (!_c->is_leader()) {
+    auto prepared_it = _prepared.find(pid);
+    if (prepared_it != _prepared.end()) {
+        if (prepared_it->second != etag) {
+            return ss::make_ready_future<tx_errc>(tx_errc::conflict);
+        }
+        return ss::make_ready_future<tx_errc>(tx_errc::success);
+    }
+
+    auto expected_it = _expected.find(pid);
+    if (expected_it == _expected.end()) {
         return ss::make_ready_future<tx_errc>(tx_errc::conflict);
     }
-    if (_insync_term != etag) {
+
+    if (expected_it->second != etag) {
         return ss::make_ready_future<tx_errc>(tx_errc::conflict);
     }
 
@@ -313,8 +323,10 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
         etag,
         model::make_memory_record_batch_reader(std::move(batch)),
         raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([](result<raft::replicate_result> r){
+      .then([this, etag, pid](result<raft::replicate_result> r){
           if (r) {
+              _expected.erase(pid);
+              _prepared.emplace(pid, etag);
               return tx_errc::success;
           }
           return tx_errc::timeout;

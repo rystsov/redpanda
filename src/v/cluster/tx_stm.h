@@ -97,13 +97,14 @@ private:
     absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
     absl::flat_hash_map<model::producer_identity, model::offset> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;
+    absl::flat_hash_map<model::producer_identity, model::term_id> _prepared;
 
 
     // {expected}:  map  pid -> term
     // {estimated}: list [(pid,offset)]
     // {ongoing}:   set  offset
     //              map  pid->offset
-    // {prepared}:  set  pid
+    // {prepared}:  map  pid -> term
     // {aborted}:   list [($pid, first, last)]
 
     /*
