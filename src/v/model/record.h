@@ -438,12 +438,14 @@ struct batch_identity {
           .first_seq = hdr.base_sequence,
           .last_seq = increment_sequence(
             hdr.base_sequence, hdr.last_offset_delta),
+          .record_count = hdr.record_count,
           .is_transactional = hdr.attrs.is_transactional()};
     }
 
     producer_identity pid;
     int32_t first_seq{0};
     int32_t last_seq{0};
+    int32_t record_count;
     bool is_transactional{false};
 
     bool has_idempotent() { return pid.id >= 0; }

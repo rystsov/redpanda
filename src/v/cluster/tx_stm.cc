@@ -355,13 +355,55 @@ tx_stm::begin_tx(model::producer_identity pid) {
 
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
-  [[maybe_unused]] model::batch_identity bid,
+  model::batch_identity bid,
   model::record_batch_reader&& r,
   [[maybe_unused]] raft::replicate_options opts) {
-    vlog(clusterlog.info, "tx replicating");
-    return _c->replicate(std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
-      .then([](result<raft::replicate_result> r) {
+    if (!_c->is_leader()) {
+        // TODO: sane error
+        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
+            kafka::error_code::unknown_server_error));
+    }
+    
+    if (_insync_term != _c->term()) {
+        (void)ss::with_gate(_gate, [this] { return catchup(); });
+        // TODO: sane error
+        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
+            kafka::error_code::unknown_server_error));
+    }
+    
+    auto term = _expected.find(bid.pid);
+    if (term == _expected.end()) {
+        // TODO: sane error
+        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
+            kafka::error_code::unknown_server_error));
+    }
+    
+    if (_estimated.contains(bid.pid)) {
+        // TODO: sane error
+        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
+            kafka::error_code::unknown_server_error));
+    }
+
+    if (_ongoing_map.contains(bid.pid)) {
+        return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
+            .then([](result<raft::replicate_result> r) {
+                if (r) {
+                    return checked<raft::replicate_result, kafka::error_code>(r.value());
+                }
+                return checked<raft::replicate_result, kafka::error_code>(
+                    kafka::error_code::unknown_server_error);
+            });
+    }
+
+    _estimated.emplace(bid.pid, _insync_offset);
+    return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
+      .then([this, bid](result<raft::replicate_result> r) {
           if (r) {
+              auto rr = r.value();
+              auto base_offset = model::offset(rr.last_offset() - (bid.record_count - 1));
+              _ongoing_map.emplace(bid.pid, base_offset);
+              _ongoing_set.insert(base_offset);
+              _estimated.erase(bid.pid);
               return checked<raft::replicate_result, kafka::error_code>(r.value());
           }
           return checked<raft::replicate_result, kafka::error_code>(

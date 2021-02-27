@@ -26,6 +26,7 @@
 #include "cluster/types.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/btree_set.h>
 
 namespace cluster {
 
@@ -93,6 +94,10 @@ private:
     ////////////////////////////////////
 
     absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
+    absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
+    absl::flat_hash_map<model::producer_identity, model::offset> _ongoing_map;
+    absl::btree_set<model::offset> _ongoing_set;
+
 
     // {expected}:  map  pid -> term
     // {estimated}: list [(pid,offset)]
