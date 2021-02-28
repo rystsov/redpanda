@@ -418,6 +418,45 @@ tx_stm::begin_tx(model::producer_identity pid) {
     return std::optional<model::term_id>(_insync_term);
 }
 
+std::optional<model::offset>
+tx_stm::tx_lso() {
+    std::optional<model::offset> min = std::nullopt;
+    
+    if (!_ongoing_set.empty()) {
+        min = std::optional<model::offset>(*_ongoing_set.begin());
+    }
+
+    for (auto& entry : _estimated) {
+        if (!min.has_value()) {
+            min = std::optional<model::offset>(entry.second);
+        }
+        if (entry.second < min.value()) {
+            min = std::optional<model::offset>(entry.second);
+        }
+    }
+
+    if (min.has_value()) {
+        return std::optional<model::offset>(min.value()-1);
+    }
+
+    return std::nullopt;
+}
+
+std::vector<tx_stm::tx_range>
+tx_stm::aborted_transactions(model::offset from, model::offset to) {
+    std::vector<tx_stm::tx_range> result;
+    for (auto& range : _aborted) {
+        if (range.last < from) {
+            continue;
+        }
+        if (range.first > to) {
+            continue;
+        }
+        result.push_back(range);
+    }
+    return result;
+}
+
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
   model::batch_identity bid,

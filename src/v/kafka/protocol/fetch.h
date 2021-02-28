@@ -499,9 +499,15 @@ private:
 
 struct fetch_config {
     model::offset start_offset;
+    model::offset max_offset;
+    int8_t isolation_level;
     size_t max_bytes;
     model::timeout_clock::time_point timeout;
     bool strict_max_bytes{false};
+};
+struct fetched_offset_range {
+    model::offset base_offset;
+    model::offset last_offset;
 };
 /**
  * Simple type aggregating either reader and offsets or an error
@@ -516,6 +522,14 @@ struct read_result {
       , high_watermark(hw)
       , last_stable_offset(lso)
       , error(error_code::none) {}
+    
+    read_result(
+      model::record_batch_reader rdr, model::offset hw, model::offset lso, fetched_offset_range fr)
+      : reader(std::move(rdr))
+      , high_watermark(hw)
+      , last_stable_offset(lso)
+      , fetched_range(fr)
+      , error(error_code::none) {}
 
     read_result(model::offset hw, model::offset lso)
       : high_watermark(hw)
@@ -525,8 +539,10 @@ struct read_result {
     std::optional<model::record_batch_reader> reader;
     model::offset high_watermark;
     model::offset last_stable_offset;
+    fetched_offset_range fetched_range;
     error_code error;
     model::partition_id partition;
+    std::vector<fetch_response::aborted_transaction> aborted_transactions;
 };
 
 using ntp_fetch_config = std::pair<model::materialized_ntp, fetch_config>;

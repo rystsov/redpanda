@@ -44,6 +44,12 @@ class tx_stm final
   : public raft::state_machine
   , public storage::snapshotable_stm {
 public:
+    struct tx_range {
+        model::producer_identity pid;
+        model::offset first;
+        model::offset last;
+    };
+    
     static constexpr model::control_record_version prepare_control_record_version{0};
     
     explicit tx_stm(ss::logger&, raft::consensus*, config::configuration&);
@@ -59,6 +65,9 @@ public:
     ss::future<tx_errc> commit_tx(model::producer_identity, model::timeout_clock::time_point);
     std::optional<model::term_id> begin_tx(model::producer_identity);
 
+    std::optional<model::offset> tx_lso();
+    std::vector<tx_stm::tx_range> aborted_transactions(model::offset, model::offset);
+
     ss::future<checked<raft::replicate_result, kafka::error_code>> replicate(
       model::batch_identity,
       model::record_batch_reader&&,
@@ -67,12 +76,6 @@ public:
 private:
     struct snapshot {
         model::offset offset;
-    };
-
-    struct tx_range {
-        model::producer_identity pid;
-        model::offset first;
-        model::offset last;
     };
 
     ss::future<> do_make_snapshot();

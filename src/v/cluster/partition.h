@@ -141,6 +141,14 @@ public:
         return _tm_stm;
     }
 
+    std::optional<model::offset> tx_lso() {
+        return _tx_stm->tx_lso();
+    }
+
+    std::vector<tx_stm::tx_range> aborted_transactions(model::offset from, model::offset to) {
+        return _tx_stm->aborted_transactions(from, to);
+    }
+
 private:
     friend partition_manager;
 

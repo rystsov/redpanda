@@ -362,9 +362,10 @@ static ss::future<read_result> read_from_partition(
         return ss::make_ready_future<read_result>(hw, lso);
     }
 
+    // TODO: is max_offset inclusive?
     storage::log_reader_config reader_config(
       config.start_offset,
-      model::model_limits<model::offset>::max(),
+      config.max_offset,
       0,
       config.max_bytes,
       kafka_read_priority(),
@@ -373,24 +374,38 @@ static ss::future<read_result> read_from_partition(
       std::nullopt);
 
     reader_config.strict_max_bytes = config.strict_max_bytes;
-    return pw.make_reader(reader_config)
-      .then([hw, lso, foreign_read, deadline](model::record_batch_reader rdr) {
-          return model::transform_reader_to_memory(
-                   std::move(rdr),
-                   deadline.value_or(model::no_timeout),
-                   adapt_fetch_batch)
-            .then([foreign_read](
-                    ss::circular_buffer<model::record_batch> data) {
-                // if we are on remote core, we MUST use foreign record batch
-                // reader.
-                if (foreign_read) {
-                    return model::make_foreign_memory_record_batch_reader(
-                      std::move(data));
-                }
-                return model::make_memory_record_batch_reader(std::move(data));
-            })
-            .then([hw, lso](model::record_batch_reader rdr) {
-                return read_result(std::move(rdr), hw, lso);
+    
+    return ss::do_with(
+      fetched_offset_range { .base_offset = model::model_limits<model::offset>::max(), .last_offset = model::offset(0) }, pw,
+      [hw, lso, foreign_read, deadline, reader_config](fetched_offset_range& fetched_range, partition_wrapper& pw) {
+          return pw.make_reader(reader_config)
+            .then([&fetched_range, hw, lso, foreign_read, deadline](model::record_batch_reader rdr) {
+                fetched_range.base_offset = fetched_range.last_offset;
+                return model::transform_reader_to_memory(
+                        std::move(rdr),
+                        deadline.value_or(model::no_timeout),
+                        [&fetched_range](model::record_batch&& batch){
+                          if (batch.base_offset() < fetched_range.base_offset) {
+                              fetched_range.base_offset = batch.base_offset();
+                          }
+                          if (fetched_range.last_offset < batch.last_offset()) {
+                              fetched_range.last_offset = batch.last_offset();
+                          }
+                          return adapt_fetch_batch(std::move(batch));
+                        })
+                  .then([foreign_read](
+                          ss::circular_buffer<model::record_batch> data) {
+                      // if we are on remote core, we MUST use foreign record batch
+                      // reader.
+                      if (foreign_read) {
+                          return model::make_foreign_memory_record_batch_reader(
+                            std::move(data));
+                      }
+                      return model::make_memory_record_batch_reader(std::move(data));
+                  })
+                  .then([&fetched_range, hw, lso](model::record_batch_reader rdr) {
+                      return read_result(std::move(rdr), hw, lso, fetched_range);
+                  });
             });
       });
 }
@@ -441,6 +456,23 @@ ss::future<read_result> read_from_ntp(
                         ? model::offset(0)
 
                         : high_watermark + model::offset(1);
+    
+    if (config::shard_local_cfg().enable_transactions.value()) {
+      vlog(klog.info, "ISOLATION {}", config.isolation_level);
+      if (config.isolation_level == 1) {
+        auto ts_lso = partition->tx_lso();
+        if (ts_lso) {
+            vlog(klog.info, "ts_lso+ {}", ts_lso);
+            config.max_offset = ts_lso.value();
+        } else {
+            vlog(klog.info, "ts_lso- {}", max_offset);
+            config.max_offset = max_offset;
+        }
+      }
+    }
+    
+    // does config has max?!
+    // nope, we should add it
     if (
       config.start_offset < partition->start_offset()
       || config.start_offset > max_offset) {
@@ -448,7 +480,16 @@ ss::future<read_result> read_from_ntp(
           error_code::offset_out_of_range);
     }
 
-    return read_from_partition(*partition_wpr, config, foreign_read, deadline);
+    return read_from_partition(*partition_wpr, config, foreign_read, deadline).then([partition](read_result result) {
+        auto txes = partition->aborted_transactions(result.fetched_range.base_offset, result.fetched_range.last_offset);
+        for (auto& tx : txes) {
+          result.aborted_transactions.push_back(fetch_response::aborted_transaction {
+            .producer_id = tx.pid.id,
+            .first_offset = tx.first
+          });
+        }
+        return result;
+    });
 }
 
 static ss::future<> do_fill_fetch_responses(
@@ -474,6 +515,7 @@ static ss::future<> do_fill_fetch_responses(
             [hw = res.high_watermark,
              lso = res.last_stable_offset,
              pid = res.partition,
+             rres = &res,
              resp_it = resp_it](kafka_batch_serializer::result res) mutable {
                 fetch_response::partition_response resp{
                   .id = pid,
@@ -483,6 +525,7 @@ static ss::future<> do_fill_fetch_responses(
                 resp_it.set(std::move(resp));
                 resp_it->partition_response->high_watermark = hw;
                 resp_it->partition_response->last_stable_offset = lso;
+                resp_it->partition_response->aborted_transactions = rres->aborted_transactions;
             })
           .handle_exception(
             [hw = res.high_watermark,
@@ -614,6 +657,8 @@ static std::vector<shard_fetch> group_requests_by_shard(op_context& octx) {
 
           fetch_config config{
             .start_offset = fp.fetch_offset,
+            .max_offset = model::model_limits<model::offset>::max(),
+            .isolation_level = octx.request.isolation_level,
             .max_bytes = std::min(octx.bytes_left, size_t(fp.max_bytes)),
             .timeout = octx.deadline.value_or(model::no_timeout),
             .strict_max_bytes = octx.response_size > 0,
