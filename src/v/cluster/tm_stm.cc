@@ -27,7 +27,7 @@ tm_stm::tm_stm(
   , _c(c)
   , _snapshot_mgr(
       std::filesystem::path(c->log_config().work_directory()),
-      "tx",
+      "tm",
       ss::default_priority_class())
   , _log(logger) {}
 
@@ -46,7 +46,11 @@ ss::future<> tm_stm::hydrate_snapshot(storage::snapshot_reader& reader) {
           .then([this](iobuf data_buf) {
               iobuf_parser data_parser(std::move(data_buf));
               auto data = reflection::adl<snapshot>{}.from(data_parser);
-              // data recovery
+              ///////////////////////////////////
+              // read snapshot and appy to empty _tx_table
+              // _tx_table is empty because hydrate_snapshot is 
+              // invoked only on start
+              ///////////////////////////////////
               _last_snapshot_offset = data.offset;
               _insync_offset = data.offset;
               vlog(

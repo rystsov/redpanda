@@ -60,6 +60,7 @@ v_cc_library(
     id_allocator_stm.cc
     tx_stm.cc
     tm_stm.cc
+    persisted_stm.cc
   DEPS
     Seastar::seastar
     controller_rpc
