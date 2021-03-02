@@ -30,10 +30,6 @@
 
 namespace cluster {
 
-struct tm_snapshot {
-    model::offset offset;
-};
-
 struct tm_transaction {
     enum tx_status {
         ongoing,
@@ -56,12 +52,17 @@ struct tm_transaction {
     int64_t etag;
 };
 
+struct tm_snapshot {
+    model::offset offset;
+    std::vector<tm_transaction> transactions;
+};
+
 class tm_stm final
   : public persisted_stm
 {
 public:
     static constexpr const int8_t supported_version = 0;
-    
+
     enum op_status {
         success,
         not_found,

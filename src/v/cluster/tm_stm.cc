@@ -119,6 +119,10 @@ void tm_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tm_ss_buf) {
     vassert(hdr.version == supported_version, "unsupported seq_snapshot_header version {}", hdr.version);
     iobuf_parser data_parser(std::move(tm_ss_buf));
     auto data = reflection::adl<tm_snapshot>{}.from(data_parser);
+    
+    for (auto& entry : data.transactions) {
+        _tx_table.emplace(entry.id, entry);
+    }
     _last_snapshot_offset = data.offset;
     _insync_offset = data.offset;
 }
@@ -126,6 +130,9 @@ void tm_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tm_ss_buf) {
 stm_snapshot tm_stm::take_snapshot() {
     tm_snapshot tm_ss;
     tm_ss.offset = _insync_offset;
+    for (auto& entry : _tx_table) {
+        tm_ss.transactions.push_back(entry.second);
+    }
 
     iobuf tm_ss_buf;
     reflection::adl<tm_snapshot>{}.to(tm_ss_buf, tm_ss);
