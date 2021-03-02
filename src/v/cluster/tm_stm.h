@@ -24,6 +24,7 @@
 #include "storage/snapshot.h"
 #include "utils/expiring_promise.h"
 #include "utils/mutex.h"
+#include "cluster/persisted_stm.h"
 
 #include <absl/container/flat_hash_map.h>
 
@@ -37,6 +38,10 @@ struct tm_snapshot_header {
 
     static constexpr const size_t ondisk_size = sizeof(version)
                                                 + sizeof(snapshot_size);
+};
+
+struct tm_snapshot {
+    model::offset offset;
 };
 
 struct tm_transaction {
@@ -62,8 +67,8 @@ struct tm_transaction {
 };
 
 class tm_stm final
-  : public raft::state_machine
-  , public storage::snapshotable_stm {
+  : public persisted_stm<tm_snapshot, tm_snapshot_header>
+{
 public:
     enum op_status {
         success,
@@ -74,12 +79,6 @@ public:
 
     explicit tm_stm(ss::logger&, raft::consensus*, config::configuration&);
 
-    ss::future<> start() final;
-
-    ss::future<> ensure_snapshot_exists(model::offset) final;
-    ss::future<> make_snapshot() final;
-    ss::future<> catchup();
-
     std::optional<tm_transaction> get_tx(kafka::transactional_id);
     ss::future<checked<tm_transaction, tm_stm::op_status>> try_change_status(kafka::transactional_id, int64_t, tm_transaction::tx_status);
     checked<tm_transaction, tm_stm::op_status> mark_tx_finished(kafka::transactional_id, int64_t);
@@ -87,30 +86,14 @@ public:
     ss::future<tm_stm::op_status> register_new_producer(kafka::transactional_id, model::producer_identity);
     bool add_partitions(kafka::transactional_id, int64_t, std::vector<tm_transaction::rm>);
 
-private:
-    struct snapshot {
-        model::offset offset;
-    };
+    ss::future<> start() override;
 
-    ss::future<> do_make_snapshot();
-    ss::future<> hydrate_snapshot(storage::snapshot_reader&);
-
-    ss::future<> wait_for_snapshot_hydrated();
-    ss::future<> persist_snapshot(iobuf&& data);
+protected:
+    void load_snapshot(tm_snapshot&) override;
+    tm_snapshot take_snapshot() override;
     void compact_snapshot();
 
-    ss::future<> catchup(model::term_id, model::offset);
-
-    model::offset _last_snapshot_offset;
     absl::flat_hash_map<kafka::transactional_id, tm_transaction> _tx_table;
-    mutex _op_lock;
-    ss::shared_promise<> _resolved_when_snapshot_hydrated;
-    bool _is_catching_up{false};
-    model::term_id _insync_term{-1};
-    model::offset _insync_offset{-1};
-    raft::consensus* _c;
-    storage::snapshot_manager _snapshot_mgr;
-    ss::logger& _log;
     ss::future<> apply(model::record_batch b) override;
 };
 
