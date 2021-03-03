@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0
 
 #include "cluster/persisted_stm.h"
+#include "utils/expiring_promise.h"
 
 #include "cluster/logger.h"
 #include "raft/errc.h"
@@ -152,6 +153,22 @@ persisted_stm::catchup(model::term_id last_term, model::offset last_offset) {
               _insync_term = last_term;
           }
       });
+}
+
+ss::future<bool>
+persisted_stm::is_caught_up(model::timeout_clock::duration timeout) {
+    if (!_c->is_leader()) {
+        return ss::make_ready_future<bool>(false);
+    }
+    
+    auto deadline = model::timeout_clock::now() + timeout;
+    auto is_caught = ss::make_lw_shared<expiring_promise<bool>>();
+
+    (void)catchup().then([is_caught](){
+        is_caught->set_value(true);
+    });
+
+    return is_caught->get_future_with_timeout(deadline, [](){ return false; });
 }
 
 ss::future<>

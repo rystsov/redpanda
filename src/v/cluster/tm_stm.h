@@ -25,10 +25,32 @@
 #include "utils/expiring_promise.h"
 #include "utils/mutex.h"
 #include "cluster/persisted_stm.h"
+#include <compare>
 
 #include <absl/container/flat_hash_map.h>
 
 namespace cluster {
+
+struct tm_etag {
+    int64_t log_etag {0};
+    int64_t mem_etag {0};
+
+    tm_etag inc_mem() const {
+        return tm_etag {
+            .log_etag = this->log_etag,
+            .mem_etag = this->mem_etag + 1
+        };
+    }
+
+    tm_etag inc_log() const {
+        return tm_etag {
+            .log_etag = this->log_etag + 1,
+            .mem_etag = 0
+        };
+    }
+
+    auto operator<=>(const tm_etag&) const = default;
+};
 
 struct tm_transaction {
     enum tx_status {
@@ -49,13 +71,15 @@ struct tm_transaction {
     model::producer_identity pid;
     // TODO: make an ntp map 
     std::vector<rm> partitions;
-    int64_t etag;
+    tm_etag etag;
+    model::term_id update_term;
 };
 
 struct tm_snapshot {
     model::offset offset;
     std::vector<tm_transaction> transactions;
 };
+
 
 class tm_stm final
   : public persisted_stm
@@ -73,20 +97,36 @@ public:
     explicit tm_stm(ss::logger&, raft::consensus*, config::configuration&);
 
     std::optional<tm_transaction> get_tx(kafka::transactional_id);
-    ss::future<checked<tm_transaction, tm_stm::op_status>> try_change_status(kafka::transactional_id, int64_t, tm_transaction::tx_status);
-    checked<tm_transaction, tm_stm::op_status> mark_tx_finished(kafka::transactional_id, int64_t);
-    ss::future<tm_stm::op_status> re_register_producer(kafka::transactional_id, int64_t, model::producer_identity);
+    ss::future<checked<tm_transaction, tm_stm::op_status>> try_change_status(kafka::transactional_id, tm_etag, tm_transaction::tx_status);
+    checked<tm_transaction, tm_stm::op_status> mark_tx_finished(kafka::transactional_id, tm_etag);
+    ss::future<tm_stm::op_status> re_register_producer(kafka::transactional_id, tm_etag, model::producer_identity);
     ss::future<tm_stm::op_status> register_new_producer(kafka::transactional_id, model::producer_identity);
-    bool add_partitions(kafka::transactional_id, int64_t, std::vector<tm_transaction::rm>);
+    bool add_partitions(kafka::transactional_id, tm_etag, std::vector<tm_transaction::rm>);
 
 protected:
+    struct tx_updated_cmd {
+        static constexpr uint8_t record_key = 0;
+        tm_transaction tx;
+        tm_etag prev_etag;
+    };
+
     void load_snapshot(stm_snapshot_header, iobuf&&) override;
     stm_snapshot take_snapshot() override;
 
     void compact_snapshot();
 
     absl::flat_hash_map<kafka::transactional_id, tm_transaction> _tx_table;
+    absl::flat_hash_map<kafka::transactional_id, std::unique_ptr<mutex>> _tx_locks;
     ss::future<> apply(model::record_batch b) override;
+
+private:
+    ss::future<checked<tm_transaction, tm_stm::op_status>> save_tx(std::unique_ptr<mutex>&, model::term_id, tm_transaction);
+    ss::future<result<raft::replicate_result>> replicate_quorum_ack(model::term_id term, model::record_batch&& batch) {
+        return _c->replicate(
+            term,
+            model::make_memory_record_batch_reader(std::move(batch)),
+            raft::replicate_options{raft::consistency_level::quorum_ack});
+    }
 };
 
 } // namespace raft

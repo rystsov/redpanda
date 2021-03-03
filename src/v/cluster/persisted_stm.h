@@ -82,7 +82,7 @@ protected:
     ss::future<> do_make_snapshot();
 
     ss::future<> catchup(model::term_id, model::offset);
-    
+    ss::future<bool> is_caught_up(model::timeout_clock::duration);
     
     mutex _op_lock;
     ss::shared_promise<> _resolved_when_snapshot_hydrated;
