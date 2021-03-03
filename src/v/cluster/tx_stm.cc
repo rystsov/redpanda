@@ -12,6 +12,7 @@
 #include "raft/errc.h"
 #include "kafka/protocol/response_writer.h"
 #include "cluster/logger.h"
+#include "kafka/protocol/request_reader.h"
 #include "raft/types.h"
 #include "storage/record_batch_builder.h"
 #include "storage/parser_utils.h"
@@ -25,187 +26,20 @@ namespace cluster {
 
 tx_stm::tx_stm(
   ss::logger& logger, raft::consensus* c, [[maybe_unused]] config::configuration& config)
-  : raft::state_machine(c, logger, ss::default_priority_class())
-  , _c(c)
-  , _snapshot_mgr(
-      std::filesystem::path(c->log_config().work_directory()),
-      "tx",
-      ss::default_priority_class())
-  , _log(logger) {}
-
-ss::future<> tx_stm::hydrate_snapshot(storage::snapshot_reader& reader) {
-    return reader.read_metadata().then([this, &reader](iobuf meta_buf) {
-        iobuf_parser meta_parser(std::move(meta_buf));
-        tx_snapshot_header hdr;
-        hdr.version = reflection::adl<int8_t>{}.from(meta_parser);
-        vassert(
-          hdr.version == tx_snapshot_header::supported_version,
-          "unsupported tx_snapshot_header version {}",
-          hdr.version);
-        hdr.snapshot_size = reflection::adl<int32_t>{}.from(meta_parser);
-
-        return read_iobuf_exactly(reader.input(), hdr.snapshot_size)
-          .then([this](iobuf data_buf) {
-              iobuf_parser data_parser(std::move(data_buf));
-              auto data = reflection::adl<snapshot>{}.from(data_parser);
-              // data recovery
-              _last_snapshot_offset = data.offset;
-              _insync_offset = data.offset;
-              vlog(
-                clusterlog.trace,
-                "tx_stm snapshot with offset:{} is loaded",
-                data.offset);
-          })
-          .then([this]() { return _snapshot_mgr.remove_partial_snapshots(); });
-    });
-}
-
-ss::future<> tx_stm::wait_for_snapshot_hydrated() {
-    auto f = ss::now();
-    if (unlikely(!_resolved_when_snapshot_hydrated.available())) {
-        f = _resolved_when_snapshot_hydrated.get_shared_future();
-    }
-    return f;
-}
-
-ss::future<> tx_stm::persist_snapshot(iobuf&& data) {
-    tx_snapshot_header header;
-    header.version = tx_snapshot_header::supported_version;
-    header.snapshot_size = data.size_bytes();
-
-    iobuf data_size_buf;
-    reflection::serialize(data_size_buf, header.version, header.snapshot_size);
-
-    return _snapshot_mgr.start_snapshot().then(
-      [this, data = std::move(data), data_size_buf = std::move(data_size_buf)](
-        storage::snapshot_writer writer) mutable {
-          return ss::do_with(
-            std::move(writer),
-            [this,
-             data = std::move(data),
-             data_size_buf = std::move(data_size_buf)](
-              storage::snapshot_writer& writer) mutable {
-                return writer.write_metadata(std::move(data_size_buf))
-                  .then([&writer, data = std::move(data)]() mutable {
-                      return write_iobuf_to_output_stream(
-                        std::move(data), writer.output());
-                  })
-                  .finally([&writer] { return writer.close(); })
-                  .then([this, &writer] {
-                      return _snapshot_mgr.finish_snapshot(writer);
-                  });
-            });
-      });
-}
-
-ss::future<> tx_stm::make_snapshot() {
-    return _op_lock.with([this]() {
-        auto f = wait_for_snapshot_hydrated();
-        return f.then([this] { return do_make_snapshot(); });
-    });
-}
-
-ss::future<> tx_stm::ensure_snapshot_exists(model::offset target_offset) {
-    return _op_lock.with([this, target_offset]() {
-        auto f = wait_for_snapshot_hydrated();
-
-        return f.then([this, target_offset] {
-            if (target_offset <= _last_snapshot_offset) {
-                return ss::now();
-            }
-            return wait(target_offset, model::no_timeout)
-              .then([this, target_offset]() {
-                  vassert(
-                    target_offset <= _insync_offset,
-                    "after we waited for target_offset ({}) _insync_offset "
-                    "({}) should have matched it or bypassed",
-                    target_offset,
-                    _insync_offset);
-                  return do_make_snapshot();
-              });
-        });
-    });
-}
-
-ss::future<> tx_stm::do_make_snapshot() {
-    vlog(clusterlog.trace, "saving tx_stm snapshot");
-    snapshot data;
-    data.offset = _insync_offset;
-    // dump data
-
-    iobuf v_buf;
-    reflection::adl<snapshot>{}.to(v_buf, data);
-    return persist_snapshot(std::move(v_buf))
-      .then([this, snapshot_offset = data.offset]() {
-          if (snapshot_offset >= _last_snapshot_offset) {
-              _last_snapshot_offset = snapshot_offset;
-          }
-      });
-}
-
-ss::future<> tx_stm::start() {
-    return _snapshot_mgr.open_snapshot().then(
-      [this](std::optional<storage::snapshot_reader> reader) {
-          auto f = ss::now();
-          if (reader) {
-              f = ss::do_with(
-                std::move(*reader), [this](storage::snapshot_reader& reader) {
-                    return hydrate_snapshot(reader).finally([this, &reader] {
-                        auto offset = std::max(
-                          _insync_offset, _c->start_offset());
-                        if (offset >= model::offset(0)) {
-                            set_next(offset);
-                        }
-                        _resolved_when_snapshot_hydrated.set_value();
-                        return reader.close();
-                    });
-                });
-          } else {
-              auto offset = _c->start_offset();
-              if (offset >= model::offset(0)) {
-                  set_next(offset);
-              }
-              _resolved_when_snapshot_hydrated.set_value();
-          }
-
-          return f.then([this]() { return state_machine::start(); })
-            .then([this]() {
-                auto offset = _c->meta().commit_index;
-                if (offset >= model::offset(0)) {
-                    (void)ss::with_gate(_gate, [this, offset] {
-                        // saving a snapshot after catchup with the tip of the
-                        // log
-                        return ensure_snapshot_exists(offset);
-                    });
-                }
-            });
-      });
-}
-
-ss::future<> tx_stm::catchup() {
-    if (_insync_term != _c->term()) {
-        if (!_is_catching_up) {
-            _is_catching_up = true;
-            auto meta = _c->meta();
-            return catchup(meta.prev_log_term, meta.prev_log_index)
-              .then([this]() { _is_catching_up = false; });
-        }
-    }
-    return ss::now();
-}
+  : persisted_stm("tx", logger, c, config) {}
 
 static iobuf make_control_record_key(model::control_record_type crt) {
     iobuf b;
     kafka::response_writer w(b);
-    w.write(model::current_control_record_version);
-    w.write(crt);
+    w.write(model::current_control_record_version());
+    w.write((int16_t)crt);
     return b;
 }
 
 static iobuf make_prepare_control_record_key(model::partition_id tm) {
     iobuf b;
     kafka::response_writer w(b);
-    w.write(tx_stm::prepare_control_record_version);
+    w.write(tx_stm::prepare_control_record_version());
     w.write(tm);
     return b;
 }
@@ -296,7 +130,7 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
         return ss::make_ready_future<tx_errc>(tx_errc::timeout);
     }
 
-    if (!_expected.contains(pid) && !_prepared.contains(pid)) {
+    if (!_prepared.contains(pid)) {
         return ss::make_ready_future<tx_errc>(tx_errc::success);
     }
     
@@ -307,30 +141,19 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
         _insync_term,
         model::make_memory_record_batch_reader(std::move(batch)),
         raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([pid, this](result<raft::replicate_result> r) {
-          if (r) {
-              _prepared.erase(pid);
-              _expected.erase(pid);
-              auto offset_it = _ongoing_map.find(pid);
-              if (offset_it == _ongoing_map.end()) {
-                  return tx_errc::success;
-              }
-              _aborted.push_back(offset_it->second);
-              _ongoing_set.erase(offset_it->second.first);
-              _ongoing_map.erase(pid);
-              return tx_errc::success;
+      .then([this](result<raft::replicate_result> r) {
+          if (!r) {
+              return ss::make_ready_future<tx_errc>(tx_errc::timeout);
           }
-          return tx_errc::timeout;
+          return wait(model::offset(r.value().last_offset()), model::no_timeout).then([](){
+              return tx_errc::success;
+          });
       });
 }
 
 ss::future<tx_errc>
 tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    auto prepared_it = _prepared.find(pid);
-    if (prepared_it != _prepared.end()) {
-        if (prepared_it->second != etag) {
-            return ss::make_ready_future<tx_errc>(tx_errc::conflict);
-        }
+    if (_prepared.contains(pid)) {
         return ss::make_ready_future<tx_errc>(tx_errc::success);
     }
 
@@ -338,7 +161,6 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
     if (expected_it == _expected.end()) {
         return ss::make_ready_future<tx_errc>(tx_errc::conflict);
     }
-
     if (expected_it->second != etag) {
         return ss::make_ready_future<tx_errc>(tx_errc::conflict);
     }
@@ -348,13 +170,13 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
         etag,
         model::make_memory_record_batch_reader(std::move(batch)),
         raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([this, etag, pid](result<raft::replicate_result> r){
-          if (r) {
-              _expected.erase(pid);
-              _prepared.emplace(pid, etag);
-              return tx_errc::success;
+      .then([this](result<raft::replicate_result> r){
+          if (!r) {
+              return ss::make_ready_future<tx_errc>(tx_errc::timeout);
           }
-          return tx_errc::timeout;
+          return wait(model::offset(r.value().last_offset()), model::no_timeout).then([](){
+              return tx_errc::success;
+          });
       });
 }
 
@@ -371,10 +193,7 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
         return ss::make_ready_future<tx_errc>(tx_errc::timeout);
     }
 
-    if (_expected.contains(pid)) {
-        // TODO: sane error
-        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
-    }
+    // TODO: wait for leader offset
 
     if (!_prepared.contains(pid)) {
         return ss::make_ready_future<tx_errc>(tx_errc::success);
@@ -382,23 +201,17 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
 
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_commit);
 
-    vlog(clusterlog.info, "comitting tx");
     return _c->replicate(
         _insync_term,
         model::make_memory_record_batch_reader(std::move(batch)),
         raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([this, pid](result<raft::replicate_result> r) {
-          if (r) {
-              _prepared.erase(pid);
-              auto offset_it = _ongoing_map.find(pid);
-              if (offset_it == _ongoing_map.end()) {
-                  return tx_errc::success;
-              }
-              _ongoing_set.erase(offset_it->second.first);
-              _ongoing_map.erase(pid);
-              return tx_errc::success;
+      .then([this](result<raft::replicate_result> r) {
+          if (!r) {
+              return ss::make_ready_future<tx_errc>(tx_errc::timeout);
           }
-          return tx_errc::timeout;
+          return wait(model::offset(r.value().last_offset()), model::no_timeout).then([](){
+              return tx_errc::success;
+          });
       });
 }
 
@@ -488,77 +301,146 @@ tx_stm::replicate(
             kafka::error_code::unknown_server_error));
     }
 
-    if (_ongoing_map.contains(bid.pid)) {
-        return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
+    if (!_ongoing_map.contains(bid.pid) && !_estimated.contains(bid.pid)) {
+        _estimated.emplace(bid.pid, _insync_offset);
+    }
+
+    return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
             .then([this, bid](result<raft::replicate_result> r) {
                 if (!r) {
                     // TODO: check that failed replicate lead to aborted tx
                     return checked<raft::replicate_result, kafka::error_code>(
                         kafka::error_code::unknown_server_error);
                 }
+                auto b = r.value();
+                auto last_offset = model::offset(b.last_offset());
                 auto ongoing_it = _ongoing_map.find(bid.pid);
-                if (ongoing_it == _ongoing_map.end()) {
-                    return checked<raft::replicate_result, kafka::error_code>(
-                        kafka::error_code::unknown_server_error);
+                if (ongoing_it != _ongoing_map.end()) {
+                    if (ongoing_it->second.last < last_offset) {
+                        ongoing_it->second.last = last_offset;
+                    }
+                } else {
+                    auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
+                    _ongoing_map.emplace(bid.pid, tx_range {
+                        .pid = bid.pid,
+                        .first = base_offset,
+                        .last = model::offset(last_offset)
+                    });
+                    _ongoing_set.insert(base_offset);
+                    _estimated.erase(bid.pid);
                 }
-                auto rr = r.value();
-                ongoing_it->second.last = model::offset(rr.last_offset());
-                return checked<raft::replicate_result, kafka::error_code>(rr);
+                return checked<raft::replicate_result, kafka::error_code>(b);
             });
-    }
-
-    _estimated.emplace(bid.pid, _insync_offset);
-    return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
-      .then([this, bid](result<raft::replicate_result> r) {
-          if (r) {
-              auto rr = r.value();
-              auto base_offset = model::offset(rr.last_offset() - (bid.record_count - 1));
-              _ongoing_map.emplace(bid.pid, tx_range {
-                  .pid = bid.pid,
-                  .first = base_offset,
-                  .last = model::offset(rr.last_offset())
-              });
-              _ongoing_set.insert(base_offset);
-              _estimated.erase(bid.pid);
-              return checked<raft::replicate_result, kafka::error_code>(r.value());
-          }
-          return checked<raft::replicate_result, kafka::error_code>(
-            kafka::error_code::unknown_server_error);
-      });
-}
-
-ss::future<>
-tx_stm::catchup(model::term_id last_term, model::offset last_offset) {
-    vlog(
-      _log.trace,
-      "tx_stm is catching up with term:{} and offset:{}",
-      last_term,
-      last_offset);
-    return wait(last_offset, model::no_timeout)
-      .then([this, last_offset, last_term]() {
-          auto meta = _c->meta();
-          vlog(
-            _log.trace,
-            "tx_stm caught up with term:{} and offset:{}; current_term: {} "
-            "current_offset: {} dirty_term: {} dirty_offset: {}",
-            last_term,
-            last_offset,
-            meta.term,
-            meta.commit_index,
-            meta.prev_log_term,
-            meta.prev_log_index);
-          if (last_term <= meta.term) {
-              _insync_term = last_term;
-          }
-      });
 }
 
 void tx_stm::compact_snapshot() { }
 
 ss::future<> tx_stm::apply(model::record_batch b) {
+    const auto& hdr = b.header();
+    auto bid = model::batch_identity::from(hdr);
+    auto pid = bid.pid;
+
+    if (hdr.type == tx_stm_prepare_batch_type) {
+        _expected.erase(pid);
+        _prepared.insert(pid);
+    } else if (hdr.type == raft::data_batch_type) {
+        if (hdr.attrs.is_control()) {
+            vassert(b.record_count() == 1, "control record must contain a single record");
+            auto r = b.copy_records();
+            auto& record = *r.begin();
+            auto key = record.release_key();
+            kafka::request_reader key_reader(std::move(key));
+            auto version = model::control_record_version(key_reader.read_int16());
+            vassert(version == model::current_control_record_version, "unknown control record version");
+            auto crt = model::control_record_type(key_reader.read_int16());
+            if (crt == model::control_record_type::tx_abort) {
+                _prepared.erase(pid);
+                _expected.erase(pid);
+                auto offset_it = _ongoing_map.find(pid);
+                if (offset_it != _ongoing_map.end()) {
+                    _aborted.push_back(offset_it->second);
+                    _ongoing_set.erase(offset_it->second.first);
+                    _ongoing_map.erase(pid);
+                }
+            } else if (crt == model::control_record_type::tx_commit) {
+                _prepared.erase(pid);
+                auto offset_it = _ongoing_map.find(pid);
+                if (offset_it != _ongoing_map.end()) {
+                    _ongoing_set.erase(offset_it->second.first);
+                    _ongoing_map.erase(pid);
+                }
+            }
+        } else {
+            auto last_offset = model::offset(b.last_offset());
+            auto ongoing_it = _ongoing_map.find(bid.pid);
+            if (ongoing_it != _ongoing_map.end()) {
+                if (ongoing_it->second.last < last_offset) {
+                    ongoing_it->second.last = last_offset;
+                }
+            } else {
+                auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
+                _ongoing_map.emplace(bid.pid, tx_range {
+                    .pid = bid.pid,
+                    .first = base_offset,
+                    .last = model::offset(last_offset)
+                });
+                _ongoing_set.insert(base_offset);
+                _estimated.erase(bid.pid);
+            }
+        }
+    }
+    
     _insync_offset = b.last_offset();
     
     return ss::now();
+}
+
+void tx_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
+    vassert(hdr.version == supported_version, "unsupported seq_snapshot_header version {}", hdr.version);
+    iobuf_parser data_parser(std::move(tx_ss_buf));
+    auto data = reflection::adl<tx_snapshot>{}.from(data_parser);
+
+    for (auto& entry : data.ongoing) {
+        _ongoing_map.emplace(entry.pid, entry);
+        _ongoing_set.insert(entry.first);
+    }
+    for (auto& entry : data.prepared) {
+        _prepared.insert(entry);
+    }
+    for (auto& entry : data.aborted) {
+        _aborted.push_back(entry);
+    }
+    
+    _last_snapshot_offset = data.offset;
+    _insync_offset = data.offset;
+}
+
+stm_snapshot tx_stm::take_snapshot() {
+    tx_snapshot tx_ss;
+    
+    for (auto& entry : _ongoing_map) {
+        tx_ss.ongoing.push_back(entry.second);
+    }
+    for (auto& entry : _prepared) {
+        tx_ss.prepared.push_back(entry);
+    }
+    for (auto& entry : _aborted) {
+        tx_ss.aborted.push_back(entry);
+    }
+    tx_ss.offset = _insync_offset;
+    
+    iobuf tx_ss_buf;
+    reflection::adl<tx_snapshot>{}.to(tx_ss_buf, tx_ss);
+    
+    stm_snapshot_header header;
+    header.version = supported_version;
+    header.snapshot_size = tx_ss_buf.size_bytes();
+
+    stm_snapshot stx_ss;
+    stx_ss.header = header;
+    stx_ss.offset = _insync_offset;
+    stx_ss.data = std::move(tx_ss_buf);
+    return stx_ss;
 }
 
 } // namespace raft

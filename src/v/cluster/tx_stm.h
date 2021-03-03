@@ -24,41 +24,34 @@
 #include "utils/expiring_promise.h"
 #include "utils/mutex.h"
 #include "cluster/types.h"
+#include "cluster/persisted_stm.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/btree_set.h>
 
 namespace cluster {
 
-struct tx_snapshot_header {
+class tx_stm final
+  : public persisted_stm {
+public:
     static constexpr const int8_t supported_version = 0;
 
-    int8_t version{tx_snapshot_header::supported_version};
-    int32_t snapshot_size{0};
-
-    static constexpr const size_t ondisk_size = sizeof(version)
-                                                + sizeof(snapshot_size);
-};
-
-class tx_stm final
-  : public raft::state_machine
-  , public storage::snapshotable_stm {
-public:
     struct tx_range {
         model::producer_identity pid;
         model::offset first;
         model::offset last;
     };
+
+    struct tx_snapshot {
+        std::vector<tx_range> ongoing;
+        std::vector<model::producer_identity> prepared;
+        std::vector<tx_range> aborted;
+        model::offset offset;
+    };
     
     static constexpr model::control_record_version prepare_control_record_version{0};
     
     explicit tx_stm(ss::logger&, raft::consensus*, config::configuration&);
-
-    ss::future<> start() final;
-
-    ss::future<> ensure_snapshot_exists(model::offset) final;
-    ss::future<> make_snapshot() final;
-    ss::future<> catchup();
 
     ss::future<tx_errc> abort_tx(model::producer_identity, model::timeout_clock::time_point);
     ss::future<tx_errc> prepare_tx(model::term_id, model::partition_id, model::producer_identity, model::timeout_clock::time_point);
@@ -73,24 +66,14 @@ public:
       model::record_batch_reader&&,
       raft::replicate_options);
 
+protected:
+    void load_snapshot(stm_snapshot_header, iobuf&&) override;
+    stm_snapshot take_snapshot() override;
+
 private:
-    struct snapshot {
-        model::offset offset;
-    };
-
-    ss::future<> do_make_snapshot();
-    ss::future<> hydrate_snapshot(storage::snapshot_reader&);
-
-    ss::future<> wait_for_snapshot_hydrated();
-    ss::future<> persist_snapshot(iobuf&& data);
     void compact_snapshot();
 
-    ss::future<> catchup(model::term_id, model::offset);
-
     ss::future<> apply(model::record_batch b) override;
-
-    model::offset _last_snapshot_offset;
-    mutex _op_lock;
     
     // track ongoing pids->[offsets]
     // X: ordered set of pids offset
@@ -104,9 +87,10 @@ private:
 
     absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
     absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
+    
     absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;
-    absl::flat_hash_map<model::producer_identity, model::term_id> _prepared;
+    absl::btree_set<model::producer_identity> _prepared;
     std::vector<tx_range> _aborted;
 
 
@@ -171,14 +155,6 @@ when abort(pid) comes:
       remove $pid from {expected}
 
     */
-    
-    ss::shared_promise<> _resolved_when_snapshot_hydrated;
-    bool _is_catching_up{false};
-    model::term_id _insync_term{-1};
-    model::offset _insync_offset{-1};
-    raft::consensus* _c;
-    storage::snapshot_manager _snapshot_mgr;
-    ss::logger& _log;
 };
 
 } // namespace raft
