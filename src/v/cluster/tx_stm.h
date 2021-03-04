@@ -56,7 +56,7 @@ public:
     ss::future<tx_errc> abort_tx(model::producer_identity, model::timeout_clock::time_point);
     ss::future<tx_errc> prepare_tx(model::term_id, model::partition_id, model::producer_identity, model::timeout_clock::time_point);
     ss::future<tx_errc> commit_tx(model::producer_identity, model::timeout_clock::time_point);
-    std::optional<model::term_id> begin_tx(model::producer_identity);
+    ss::future<std::optional<model::term_id>> begin_tx(model::producer_identity);
 
     std::optional<model::offset> tx_lso();
     std::vector<tx_stm::tx_range> aborted_transactions(model::offset, model::offset);

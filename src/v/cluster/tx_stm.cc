@@ -23,6 +23,7 @@
 #include <filesystem>
 
 namespace cluster {
+using namespace std::chrono_literals;
 
 tx_stm::tx_stm(
   ss::logger& logger, raft::consensus* c, [[maybe_unused]] config::configuration& config)
@@ -215,20 +216,18 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
       });
 }
 
-std::optional<model::term_id>
+ss::future<std::optional<model::term_id>>
 tx_stm::begin_tx(model::producer_identity pid) {
-    if (!_c->is_leader()) {
-        return std::nullopt;
-    }
-    if (_insync_term != _c->term()) {
-        (void)ss::with_gate(_gate, [this] { return catchup(); });
-        return std::nullopt;
-    }
-    if (_expected.find(pid) != _expected.end()) {
-        return std::nullopt;
-    }
-    _expected.emplace(pid, _insync_term);
-    return std::optional<model::term_id>(_insync_term);
+    return is_caught_up(2'000ms).then([this, pid](auto is_ready) {
+        if (!is_ready) {
+            return ss::make_ready_future<std::optional<model::term_id>>(std::nullopt);
+        }
+        if (_expected.find(pid) != _expected.end()) {
+            return ss::make_ready_future<std::optional<model::term_id>>(std::nullopt);
+        }
+        _expected.emplace(pid, _insync_term);
+        return ss::make_ready_future<std::optional<model::term_id>>(std::optional<model::term_id>(_insync_term));
+    });
 }
 
 std::optional<model::offset>

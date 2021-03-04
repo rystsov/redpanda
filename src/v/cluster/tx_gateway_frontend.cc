@@ -901,18 +901,19 @@ tx_gateway_frontend::do_begin_tx(model::ntp ntp, model::producer_identity pid) {
               });
           }
 
-          auto etag = stm->begin_tx(pid);
-          if (!etag) {
-              return ss::make_ready_future<begin_tx_reply>(begin_tx_reply{
-                  .ntp = ntp,
-                  .ec = tx_errc::leader_not_found
-              });
-          }
+          return stm->begin_tx(pid).then([ntp](auto etag) {
+              if (!etag) {
+                  return begin_tx_reply {
+                      .ntp = ntp,
+                      .ec = tx_errc::leader_not_found
+                  };
+              }
 
-          return ss::make_ready_future<begin_tx_reply>(begin_tx_reply{
-              .ntp = ntp,
-              .etag = etag.value(),
-              .ec = tx_errc::success
+              return begin_tx_reply {
+                  .ntp = ntp,
+                  .etag = etag.value(),
+                  .ec = tx_errc::success
+              };
           });
       });
 }
