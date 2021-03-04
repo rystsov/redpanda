@@ -20,6 +20,7 @@
 #include "errc.h"
 
 namespace cluster {
+using namespace std::chrono_literals;
 
 tx_gateway_frontend::tx_gateway_frontend(
     ss::smp_service_group ssg,
@@ -63,7 +64,7 @@ tx_gateway_frontend::get_tx_broker([[maybe_unused]] ss::sstring key) {
         auto ntp = model::ntp(nt.ns, nt.tp, model::partition_id{0});
         return _metadata_cache.local()
           .get_leader(ntp, timeout)
-          .then([]([[maybe_unused]] model::node_id leader) { 
+          .then([]([[maybe_unused]] model::node_id leader) {
             return std::optional<model::node_id>(leader);
           })
           .handle_exception([]([[maybe_unused]] std::exception_ptr e) {
@@ -440,15 +441,26 @@ ss::future<cluster::init_tm_tx_reply>
 tx_gateway_frontend::do_init_tm_tx(kafka::transactional_id tx_id, model::timeout_clock::duration timeout) {
     auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
 
-    if (shard == std::nullopt) {
-        vlog(clusterlog.warn, "can't find a shard for {}", model::kafka_tx_ntp);
-        return ss::make_ready_future<init_tm_tx_reply>(cluster::init_tm_tx_reply {
-            .ec = tx_errc::shard_not_found
-        });
+    auto i=0;
+    while (!shard && i<10) {
+        co_await ss::sleep(0'100ms);
+        shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
     }
 
+    if (!shard) {
+        vlog(clusterlog.warn, "can't find a shard for {}", model::kafka_tx_ntp);
+        co_return cluster::init_tm_tx_reply {
+            .ec = tx_errc::shard_not_found
+        };
+    }
+
+    co_return co_await do_init_tm_tx(*shard, tx_id, timeout);
+}
+
+ss::future<cluster::init_tm_tx_reply>
+tx_gateway_frontend::do_init_tm_tx(ss::shard_id shard, kafka::transactional_id tx_id, model::timeout_clock::duration timeout) {
     return _partition_manager.invoke_on(
-      *shard, _ssg, [this, tx_id, timeout](cluster::partition_manager& mgr) mutable {
+      shard, _ssg, [this, tx_id, timeout](cluster::partition_manager& mgr) mutable {
           auto partition = mgr.get(model::kafka_tx_ntp);
           if (!partition) {
               vlog(clusterlog.warn, "can't get partition by {} ntp", model::kafka_tx_ntp);
@@ -687,7 +699,6 @@ make_add_partitions_error_response(kafka::add_partitions_to_txn_request_data req
 
 ss::future<kafka::add_partitions_to_txn_response_data>
 tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, model::timeout_clock::duration timeout) {
-    
     auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
 
     if (shard == std::nullopt) {
