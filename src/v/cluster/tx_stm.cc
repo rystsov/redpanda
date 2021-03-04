@@ -343,64 +343,52 @@ tx_stm::aborted_transactions(model::offset from, model::offset to) {
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
   model::batch_identity bid,
-  model::record_batch_reader&& r,
+  model::record_batch_reader&& br,
   [[maybe_unused]] raft::replicate_options opts) {
-    if (!_c->is_leader()) {
-        // TODO: sane error
-        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
-            kafka::error_code::unknown_server_error));
-    }
-    
-    if (_insync_term != _c->term()) {
-        (void)ss::with_gate(_gate, [this] { return catchup(); });
-        // TODO: sane error
-        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
-            kafka::error_code::unknown_server_error));
+    auto is_ready = co_await is_caught_up(2'000ms);
+    if (!is_ready) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
     
     auto term = _expected.find(id(bid.pid));
     if (term == _expected.end()) {
         // TODO: sane error
-        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
-            kafka::error_code::unknown_server_error));
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
     
     if (_estimated.contains(bid.pid)) {
         // TODO: sane error
-        return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
-            kafka::error_code::unknown_server_error));
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
 
     if (!_ongoing_map.contains(bid.pid) && !_estimated.contains(bid.pid)) {
         _estimated.emplace(bid.pid, _insync_offset);
     }
 
-    return _c->replicate(term->second, std::move(r), raft::replicate_options(raft::consistency_level::leader_ack))
-            .then([this, bid](result<raft::replicate_result> r) {
-                if (!r) {
-                    // TODO: check that failed replicate lead to aborted tx
-                    return checked<raft::replicate_result, kafka::error_code>(
-                        kafka::error_code::unknown_server_error);
-                }
-                auto b = r.value();
-                auto last_offset = model::offset(b.last_offset());
-                auto ongoing_it = _ongoing_map.find(bid.pid);
-                if (ongoing_it != _ongoing_map.end()) {
-                    if (ongoing_it->second.last < last_offset) {
-                        ongoing_it->second.last = last_offset;
-                    }
-                } else {
-                    auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
-                    _ongoing_map.emplace(bid.pid, tx_range {
-                        .pid = bid.pid,
-                        .first = base_offset,
-                        .last = model::offset(last_offset)
-                    });
-                    _ongoing_set.insert(base_offset);
-                    _estimated.erase(bid.pid);
-                }
-                return checked<raft::replicate_result, kafka::error_code>(b);
-            });
+    auto r = co_await _c->replicate(term->second, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    if (!r) {
+        // TODO: check that failed replicate lead to aborted tx
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+
+    auto b = r.value();
+    auto last_offset = model::offset(b.last_offset());
+    auto ongoing_it = _ongoing_map.find(bid.pid);
+    if (ongoing_it != _ongoing_map.end()) {
+        if (ongoing_it->second.last < last_offset) {
+            ongoing_it->second.last = last_offset;
+        }
+    } else {
+        auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
+        _ongoing_map.emplace(bid.pid, tx_range {
+            .pid = bid.pid,
+            .first = base_offset,
+            .last = model::offset(last_offset)
+        });
+        _ongoing_set.insert(base_offset);
+        _estimated.erase(bid.pid);
+    }
+    co_return checked<raft::replicate_result, kafka::error_code>(b);
 }
 
 void tx_stm::compact_snapshot() { }
