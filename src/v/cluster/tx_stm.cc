@@ -17,6 +17,7 @@
 #include "storage/record_batch_builder.h"
 #include "storage/parser_utils.h"
 #include "model/record.h"
+#include <seastar/core/coroutine.hh>
 
 #include <seastar/core/future.hh>
 
@@ -118,116 +119,133 @@ static model::record_batch make_prepare_control_record_batch(model::producer_ide
     return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
 }
 
+// called stricted after a tx was canceled on the coordinator
+// the sole purpose is to put tx_range into the list of aborted txes
+// and to fence off the old epoch
 ss::future<tx_errc>
 tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    if (!_c->is_leader()) {
-        // TODO: sane error
-        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
-    }
+    // TODO: abort abort if fenced off
     
-    if (_insync_term != _c->term()) {
-        (void)ss::with_gate(_gate, [this] { return catchup(); });
-        // TODO: sane error
-        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    auto is_ready = co_await is_caught_up(2'000ms);
+    if (!is_ready) {
+        co_return tx_errc::timeout;
     }
 
-    if (!_prepared.contains(pid)) {
-        return ss::make_ready_future<tx_errc>(tx_errc::success);
-    }
-    
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_abort);
 
-    vlog(clusterlog.info, "aborting tx");
-    return _c->replicate(
+    auto r = co_await _c->replicate(
         _insync_term,
         model::make_memory_record_batch_reader(std::move(batch)),
-        raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([this](result<raft::replicate_result> r) {
-          if (!r) {
-              return ss::make_ready_future<tx_errc>(tx_errc::timeout);
-          }
-          return wait(model::offset(r.value().last_offset()), model::no_timeout).then([](){
-              return tx_errc::success;
-          });
-      });
+        raft::replicate_options(raft::consistency_level::quorum_ack));
+
+    if (!r) {
+        co_return tx_errc::timeout;
+    }
+
+    // don't need to wait for apply because tx is already aborted on the
+    // coordinator level - nothing can go wrong
+    co_return tx_errc::success;
 }
 
 ss::future<tx_errc>
 tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    // <optimization>
     if (_prepared.contains(pid)) {
-        return ss::make_ready_future<tx_errc>(tx_errc::success);
+        co_return tx_errc::success;
     }
-
     auto expected_it = _expected.find(pid);
     if (expected_it == _expected.end()) {
-        return ss::make_ready_future<tx_errc>(tx_errc::conflict);
+        co_return tx_errc::conflict;
     }
     if (expected_it->second != etag) {
-        return ss::make_ready_future<tx_errc>(tx_errc::conflict);
+        co_return tx_errc::conflict;
     }
+    // </optimization>
+
+    if (_has_prepare_applied.contains(pid)) {
+        co_return tx_errc::conflict;
+    }
+    _has_prepare_applied.emplace(pid, false);
 
     auto batch = make_prepare_control_record_batch(pid, tm);
-    return _c->replicate(
+    auto r = co_await _c->replicate(
         etag,
         model::make_memory_record_batch_reader(std::move(batch)),
-        raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([this](result<raft::replicate_result> r){
-          if (!r) {
-              return ss::make_ready_future<tx_errc>(tx_errc::timeout);
-          }
-          return wait(model::offset(r.value().last_offset()), model::no_timeout).then([](){
-              return tx_errc::success;
-          });
-      });
+        raft::replicate_options(raft::consistency_level::quorum_ack));
+    
+    if (!r) {
+        co_return tx_errc::timeout;
+    }
+
+    co_await wait(model::offset(r.value().last_offset()), model::no_timeout);
+
+    auto has_applied_it = _has_prepare_applied.find(pid);
+    if (has_applied_it == _has_prepare_applied.end()) {
+        co_return tx_errc::timeout;
+    }
+    auto applied = has_applied_it->second;
+    _has_prepare_applied.erase(pid);
+
+    if (!applied) {
+        co_return tx_errc::conflict;
+    }
+
+    co_return tx_errc::success;
 }
 
 ss::future<tx_errc>
 tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    if (!_c->is_leader()) {
-        // TODO: sane error
-        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
-    }
-    
-    if (_insync_term != _c->term()) {
-        (void)ss::with_gate(_gate, [this] { return catchup(); });
-        // TODO: sane error
-        return ss::make_ready_future<tx_errc>(tx_errc::timeout);
+    auto is_ready = co_await is_caught_up(2'000ms);
+    if (!is_ready) {
+        co_return tx_errc::timeout;
     }
 
-    // TODO: wait for leader offset
-
-    if (!_prepared.contains(pid)) {
-        return ss::make_ready_future<tx_errc>(tx_errc::success);
+    if (_has_commit_applied.contains(pid)) {
+        co_return tx_errc::conflict;
     }
+    _has_commit_applied.emplace(pid, false);
 
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_commit);
 
-    return _c->replicate(
+    auto r = co_await _c->replicate(
         _insync_term,
         model::make_memory_record_batch_reader(std::move(batch)),
-        raft::replicate_options(raft::consistency_level::quorum_ack))
-      .then([this](result<raft::replicate_result> r) {
-          if (!r) {
-              return ss::make_ready_future<tx_errc>(tx_errc::timeout);
-          }
-          return wait(model::offset(r.value().last_offset()), model::no_timeout).then([](){
-              return tx_errc::success;
-          });
-      });
+        raft::replicate_options(raft::consistency_level::quorum_ack));
+    
+    if (!r) {
+        co_return tx_errc::timeout;
+    }
+    co_await wait(model::offset(r.value().last_offset()), model::no_timeout);
+
+    auto has_commit_it = _has_commit_applied.find(pid);
+    if (has_commit_it == _has_commit_applied.end()) {
+        co_return tx_errc::timeout;
+    }
+    auto applied = has_commit_it->second;
+    _has_commit_applied.erase(pid);
+
+    if (!applied) {
+        co_return tx_errc::conflict;
+    }
+    
+    co_return tx_errc::success;
 }
 
 ss::future<std::optional<model::term_id>>
 tx_stm::begin_tx(model::producer_identity pid) {
-    return is_caught_up(2'000ms).then([this, pid](auto is_ready) {
-        if (!is_ready) {
-            return ss::make_ready_future<std::optional<model::term_id>>(std::nullopt);
-        }
-        if (_expected.find(pid) != _expected.end()) {
-            return ss::make_ready_future<std::optional<model::term_id>>(std::nullopt);
-        }
-        _expected.emplace(pid, _insync_term);
-        return ss::make_ready_future<std::optional<model::term_id>>(std::optional<model::term_id>(_insync_term));
-    });
+    auto is_ready = co_await is_caught_up(2'000ms);
+    if (!is_ready) {
+        co_return std::nullopt;
+    }
+
+    // <optimization>
+    if (_expected.find(pid) != _expected.end()) {
+        co_return std::nullopt;
+    }
+    _expected.emplace(pid, _insync_term);
+    // </optimization>
+
+    co_return std::optional<model::term_id>(_insync_term);
 }
 
 std::optional<model::offset>
@@ -342,6 +360,12 @@ ss::future<> tx_stm::apply(model::record_batch b) {
     if (hdr.type == tx_stm_prepare_batch_type) {
         _expected.erase(pid);
         _prepared.insert(pid);
+        // TODO: check if already aborted
+        // TODO: check fencing
+        auto has_applied_it = _has_prepare_applied.find(pid);
+        if (has_applied_it != _has_prepare_applied.end()) {
+            has_applied_it->second = true;
+        }
     } else if (hdr.type == raft::data_batch_type) {
         if (hdr.attrs.is_control()) {
             vassert(b.record_count() == 1, "control record must contain a single record");
@@ -353,8 +377,11 @@ ss::future<> tx_stm::apply(model::record_batch b) {
             vassert(version == model::current_control_record_version, "unknown control record version");
             auto crt = model::control_record_type(key_reader.read_int16());
             if (crt == model::control_record_type::tx_abort) {
+                // TODO: update fencing
                 _prepared.erase(pid);
                 _expected.erase(pid);
+                _has_prepare_applied.erase(pid);
+                _has_commit_applied.erase(pid);
                 auto offset_it = _ongoing_map.find(pid);
                 if (offset_it != _ongoing_map.end()) {
                     _aborted.push_back(offset_it->second);
@@ -362,6 +389,17 @@ ss::future<> tx_stm::apply(model::record_batch b) {
                     _ongoing_map.erase(pid);
                 }
             } else if (crt == model::control_record_type::tx_commit) {
+                auto applied = true;
+                if (!_prepared.contains(pid)) {
+                    applied = false;
+                }
+                // TODO: check if already aborted
+                // TODO: check fencing
+                auto has_applied_it = _has_commit_applied.find(pid);
+                if (has_applied_it != _has_commit_applied.end()) {
+                    has_applied_it->second = applied;
+                }
+                _has_prepare_applied.erase(pid);
                 _prepared.erase(pid);
                 auto offset_it = _ongoing_map.find(pid);
                 if (offset_it != _ongoing_map.end()) {

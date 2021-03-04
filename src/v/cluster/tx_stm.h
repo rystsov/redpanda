@@ -87,6 +87,8 @@ private:
 
     absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
     absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
+    absl::flat_hash_map<model::producer_identity, bool> _has_prepare_applied;
+    absl::flat_hash_map<model::producer_identity, bool> _has_commit_applied;
     
     absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;
