@@ -35,6 +35,8 @@ class tx_stm final
   : public persisted_stm {
 public:
     static constexpr const int8_t supported_version = 0;
+    using producer_id = named_type<int64_t, struct producer_identity_id>;
+    using producer_epoch = named_type<int64_t, struct producer_identity_epoch>;
 
     struct tx_range {
         model::producer_identity pid;
@@ -85,10 +87,11 @@ private:
 
     ////////////////////////////////////
 
-    absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
+    absl::flat_hash_map<producer_id, model::term_id> _expected;
     absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
     absl::flat_hash_map<model::producer_identity, bool> _has_prepare_applied;
     absl::flat_hash_map<model::producer_identity, bool> _has_commit_applied;
+    absl::flat_hash_map<producer_id, producer_epoch> _fence_pid_epoch;
     
     absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;

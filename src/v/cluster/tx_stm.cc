@@ -69,12 +69,15 @@ static model::record make_control_record(iobuf k) {
       std::vector<model::record_header>{});
 }
 
-static model::record_batch make_control_record_batch(model::producer_identity pid, model::control_record_type crt) {
+static model::record_batch_header make_control_header(
+  model::record_batch_type type,
+  model::producer_identity pid,
+  int32_t record_count) {
     auto ts = model::timestamp::now()();
-    auto header = model::record_batch_header{
+    return model::record_batch_header{
       .size_bytes = 0, // computed later
       .base_offset = model::offset(0), // ?
-      .type = raft::data_batch_type,
+      .type = type,
       .crc = 0, // we-reassign later
       .attrs = model::record_batch_attributes(model::record_batch_attributes::control_mask),
       .last_offset_delta = 0,
@@ -83,8 +86,13 @@ static model::record_batch make_control_record_batch(model::producer_identity pi
       .producer_id = pid.id,
       .producer_epoch = pid.epoch,
       .base_sequence = 0,
-      .record_count = 1};
-    
+      .record_count = record_count};
+}
+
+static model::record_batch make_control_record_batch(model::producer_identity pid, model::control_record_type crt) {
+    auto header = make_control_header(
+        raft::data_batch_type,
+        pid, 1);
     auto key = make_control_record_key(crt);
     iobuf records;
     model::append_record_to_buffer(
@@ -95,21 +103,9 @@ static model::record_batch make_control_record_batch(model::producer_identity pi
 }
 
 static model::record_batch make_prepare_control_record_batch(model::producer_identity pid, model::partition_id tm) {
-    auto ts = model::timestamp::now()();
-    auto header = model::record_batch_header{
-      .size_bytes = 0, // computed later
-      .base_offset = model::offset(0), // ?
-      .type = tx_stm_prepare_batch_type,
-      .crc = 0, // we-reassign later
-      .attrs = model::record_batch_attributes(0),
-      .last_offset_delta = 0,
-      .first_timestamp = model::timestamp(ts),
-      .max_timestamp = model::timestamp(ts),
-      .producer_id = pid.id,
-      .producer_epoch = pid.epoch,
-      .base_sequence = 0,
-      .record_count = 1};
-    
+    auto header = make_control_header(
+        tx_stm_prepare_batch_type,
+        pid, 1);
     auto key = make_prepare_control_record_key(tm);
     iobuf records;
     model::append_record_to_buffer(
@@ -117,6 +113,14 @@ static model::record_batch make_prepare_control_record_batch(model::producer_ide
         make_control_record(std::move(key)));
     storage::internal::reset_size_checksum_metadata(header, records);
     return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
+}
+
+static inline tx_stm::producer_id id(model::producer_identity pid) {
+    return tx_stm::producer_id(pid.id);
+}
+
+static inline tx_stm::producer_epoch epoch(model::producer_identity pid) {
+    return tx_stm::producer_epoch(pid.epoch);
 }
 
 // called stricted after a tx was canceled on the coordinator
@@ -153,7 +157,7 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
     if (_prepared.contains(pid)) {
         co_return tx_errc::success;
     }
-    auto expected_it = _expected.find(pid);
+    auto expected_it = _expected.find(id(pid));
     if (expected_it == _expected.end()) {
         co_return tx_errc::conflict;
     }
@@ -238,11 +242,21 @@ tx_stm::begin_tx(model::producer_identity pid) {
         co_return std::nullopt;
     }
 
+    auto fence_it = _fence_pid_epoch.find(id(pid));
+    if (epoch(pid) < fence_it->second) {
+        // todo: maybe introduce fencing error?!
+        co_return std::nullopt;
+    } else if (epoch(pid) > fence_it->second) {
+        fence_it->second = epoch(pid);
+        // todo: persist fencing
+
+    }
+
     // <optimization>
-    if (_expected.find(pid) != _expected.end()) {
+    if (_expected.find(id(pid)) != _expected.end()) {
         co_return std::nullopt;
     }
-    _expected.emplace(pid, _insync_term);
+    _expected.emplace(id(pid), _insync_term);
     // </optimization>
 
     co_return std::optional<model::term_id>(_insync_term);
@@ -305,7 +319,7 @@ tx_stm::replicate(
             kafka::error_code::unknown_server_error));
     }
     
-    auto term = _expected.find(bid.pid);
+    auto term = _expected.find(id(bid.pid));
     if (term == _expected.end()) {
         // TODO: sane error
         return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(
@@ -358,7 +372,7 @@ ss::future<> tx_stm::apply(model::record_batch b) {
     auto pid = bid.pid;
 
     if (hdr.type == tx_stm_prepare_batch_type) {
-        _expected.erase(pid);
+        _expected.erase(id(pid));
         _prepared.insert(pid);
         // TODO: check if already aborted
         // TODO: check fencing
@@ -379,7 +393,7 @@ ss::future<> tx_stm::apply(model::record_batch b) {
             if (crt == model::control_record_type::tx_abort) {
                 // TODO: update fencing
                 _prepared.erase(pid);
-                _expected.erase(pid);
+                _expected.erase(id(pid));
                 _has_prepare_applied.erase(pid);
                 _has_commit_applied.erase(pid);
                 auto offset_it = _ongoing_map.find(pid);
