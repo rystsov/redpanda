@@ -132,17 +132,12 @@ static inline tx_stm::producer_epoch epoch(model::producer_identity pid) {
 // and to fence off the old epoch
 ss::future<tx_errc>
 tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    // TODO: abort abort if fenced off
-
     // <fencing>
-    auto fence_it = _fence_pid_epoch.find(id(pid));
-    if (fence_it != _fence_pid_epoch.end()) {
-        if (epoch(pid) < fence_it->second) {
-            co_return tx_errc::timeout;
-        }
-    }
+    // doesn't make sense to fence off an abort because a decision to 
+    // has already been make on the tx coordinator and there is no way
+    // to force it to commit
     // </fencing>
-    
+
     auto is_ready = co_await is_caught_up(2'000ms);
     if (!is_ready) {
         co_return tx_errc::timeout;
@@ -166,6 +161,15 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
 
 ss::future<tx_errc>
 tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    // <fencing>
+    auto fence_it = _fence_pid_epoch.find(id(pid));
+    if (fence_it != _fence_pid_epoch.end()) {
+        if (epoch(pid) < fence_it->second) {
+            co_return tx_errc::timeout;
+        }
+    }
+    // </fencing>
+    
     // <optimization>
     if (_prepared.contains(pid)) {
         co_return tx_errc::success;
@@ -212,6 +216,13 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
 
 ss::future<tx_errc>
 tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    // <fencing>
+    // doesn't make sense to fence off a commit because a decision to 
+    // commit has already been make on the tx coordinator and there is
+    // no way to force it to undo it because it could already comitted
+    // on another partition
+    // </fencing>
+    
     auto is_ready = co_await is_caught_up(2'000ms);
     if (!is_ready) {
         co_return tx_errc::timeout;
@@ -254,6 +265,9 @@ tx_stm::begin_tx(model::producer_identity pid) {
     if (!is_ready) {
         co_return std::nullopt;
     }
+
+    // can't begin a tx if there is another tx with the
+    // same id is going on
 
     // <fencing>
     auto fence_it = _fence_pid_epoch.find(id(pid));
@@ -415,11 +429,26 @@ void tx_stm::replay(model::record_batch&& b) {
     }
     
     if (hdr.type == tx_prepare_batch_type) {
+        auto has_applied_it = _has_prepare_applied.find(pid);
+        
+        auto fence_it = _fence_pid_epoch.find(id(pid));
+        if (fence_it == _fence_pid_epoch.end()) {
+            _fence_pid_epoch.emplace(id(pid), epoch(pid));
+        } else if (fence_it->second < epoch(pid)) {
+            fence_it->second=epoch(pid);
+            _expected.erase(id(pid));
+        } else if (fence_it->second > epoch(pid)) {
+            if (has_applied_it != _has_prepare_applied.end()) {
+                has_applied_it->second = false;
+            }
+            return;
+        }
+        
         _expected.erase(id(pid));
         _prepared.insert(pid);
         // TODO: check if already aborted
         // TODO: check fencing
-        auto has_applied_it = _has_prepare_applied.find(pid);
+        
         if (has_applied_it != _has_prepare_applied.end()) {
             has_applied_it->second = true;
         }
