@@ -75,7 +75,8 @@ protected:
 private:
     void compact_snapshot();
 
-    ss::future<> apply(model::record_batch b) override;
+    ss::future<> apply(model::record_batch) override;
+    void replay(model::record_batch&&);
     
     // track ongoing pids->[offsets]
     // X: ordered set of pids offset

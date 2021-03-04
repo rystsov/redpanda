@@ -71,8 +71,7 @@ static model::record make_control_record(iobuf k) {
 
 static model::record_batch_header make_control_header(
   model::record_batch_type type,
-  model::producer_identity pid,
-  int32_t record_count) {
+  model::producer_identity pid) {
     auto ts = model::timestamp::now()();
     return model::record_batch_header{
       .size_bytes = 0, // computed later
@@ -86,13 +85,12 @@ static model::record_batch_header make_control_header(
       .producer_id = pid.id,
       .producer_epoch = pid.epoch,
       .base_sequence = 0,
-      .record_count = record_count};
+      .record_count = 0};
 }
 
 static model::record_batch make_control_record_batch(model::producer_identity pid, model::control_record_type crt) {
-    auto header = make_control_header(
-        raft::data_batch_type,
-        pid, 1);
+    auto header = make_control_header(raft::data_batch_type, pid);
+    header.record_count = 1;
     auto key = make_control_record_key(crt);
     iobuf records;
     model::append_record_to_buffer(
@@ -103,14 +101,20 @@ static model::record_batch make_control_record_batch(model::producer_identity pi
 }
 
 static model::record_batch make_prepare_control_record_batch(model::producer_identity pid, model::partition_id tm) {
-    auto header = make_control_header(
-        tx_stm_prepare_batch_type,
-        pid, 1);
+    auto header = make_control_header(tx_prepare_batch_type, pid);
+    header.record_count = 1;
     auto key = make_prepare_control_record_key(tm);
     iobuf records;
     model::append_record_to_buffer(
         records,
         make_control_record(std::move(key)));
+    storage::internal::reset_size_checksum_metadata(header, records);
+    return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
+}
+
+static model::record_batch make_fence_control_record_batch(model::producer_identity pid) {
+    auto header = make_control_header(tx_fence_batch_type, pid);
+    iobuf records;
     storage::internal::reset_size_checksum_metadata(header, records);
     return model::record_batch(header, std::move(records), model::record_batch::tag_ctor_ng{});
 }
@@ -129,6 +133,15 @@ static inline tx_stm::producer_epoch epoch(model::producer_identity pid) {
 ss::future<tx_errc>
 tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
     // TODO: abort abort if fenced off
+
+    // <fencing>
+    auto fence_it = _fence_pid_epoch.find(id(pid));
+    if (fence_it != _fence_pid_epoch.end()) {
+        if (epoch(pid) < fence_it->second) {
+            co_return tx_errc::timeout;
+        }
+    }
+    // </fencing>
     
     auto is_ready = co_await is_caught_up(2'000ms);
     if (!is_ready) {
@@ -242,15 +255,27 @@ tx_stm::begin_tx(model::producer_identity pid) {
         co_return std::nullopt;
     }
 
+    // <fencing>
     auto fence_it = _fence_pid_epoch.find(id(pid));
-    if (epoch(pid) < fence_it->second) {
-        // todo: maybe introduce fencing error?!
-        co_return std::nullopt;
-    } else if (epoch(pid) > fence_it->second) {
-        fence_it->second = epoch(pid);
-        // todo: persist fencing
-
+    if (fence_it == _fence_pid_epoch.end() || epoch(pid) > fence_it->second) {
+        auto batch = make_fence_control_record_batch(pid);
+        auto r = co_await _c->replicate(
+            _insync_term,
+            model::make_memory_record_batch_reader(std::move(batch)),
+            raft::replicate_options(raft::consistency_level::quorum_ack));
+        if (!r) {
+            co_return std::nullopt;
+        }
+        co_await wait(model::offset(r.value().last_offset()), model::no_timeout);
+        fence_it = _fence_pid_epoch.find(id(pid));
+        if (fence_it == _fence_pid_epoch.end()) {
+            co_return std::nullopt;
+        }
     }
+    if (epoch(pid) != fence_it->second) {
+        co_return std::nullopt;
+    }
+    // </fencing>
 
     // <optimization>
     if (_expected.find(id(pid)) != _expected.end()) {
@@ -367,11 +392,29 @@ tx_stm::replicate(
 void tx_stm::compact_snapshot() { }
 
 ss::future<> tx_stm::apply(model::record_batch b) {
+    auto offset = b.last_offset();
+    replay(std::move(b));
+    _insync_offset = offset;
+    return ss::now();
+}
+
+void tx_stm::replay(model::record_batch&& b) {
     const auto& hdr = b.header();
     auto bid = model::batch_identity::from(hdr);
     auto pid = bid.pid;
 
-    if (hdr.type == tx_stm_prepare_batch_type) {
+    if (hdr.type == tx_fence_batch_type) {
+        auto fence_it = _fence_pid_epoch.find(id(pid));
+        if (fence_it == _fence_pid_epoch.end()) {
+            _fence_pid_epoch.emplace(id(pid), epoch(pid));
+        } else if (fence_it->second < epoch(pid)) {
+            fence_it->second=epoch(pid);
+            _expected.erase(id(pid));
+        }
+        return;
+    }
+    
+    if (hdr.type == tx_prepare_batch_type) {
         _expected.erase(id(pid));
         _prepared.insert(pid);
         // TODO: check if already aborted
@@ -380,70 +423,83 @@ ss::future<> tx_stm::apply(model::record_batch b) {
         if (has_applied_it != _has_prepare_applied.end()) {
             has_applied_it->second = true;
         }
-    } else if (hdr.type == raft::data_batch_type) {
-        if (hdr.attrs.is_control()) {
-            vassert(b.record_count() == 1, "control record must contain a single record");
-            auto r = b.copy_records();
-            auto& record = *r.begin();
-            auto key = record.release_key();
-            kafka::request_reader key_reader(std::move(key));
-            auto version = model::control_record_version(key_reader.read_int16());
-            vassert(version == model::current_control_record_version, "unknown control record version");
-            auto crt = model::control_record_type(key_reader.read_int16());
-            if (crt == model::control_record_type::tx_abort) {
-                // TODO: update fencing
-                _prepared.erase(pid);
-                _expected.erase(id(pid));
-                _has_prepare_applied.erase(pid);
-                _has_commit_applied.erase(pid);
-                auto offset_it = _ongoing_map.find(pid);
-                if (offset_it != _ongoing_map.end()) {
-                    _aborted.push_back(offset_it->second);
-                    _ongoing_set.erase(offset_it->second.first);
-                    _ongoing_map.erase(pid);
-                }
-            } else if (crt == model::control_record_type::tx_commit) {
-                auto applied = true;
-                if (!_prepared.contains(pid)) {
-                    applied = false;
-                }
-                // TODO: check if already aborted
-                // TODO: check fencing
-                auto has_applied_it = _has_commit_applied.find(pid);
-                if (has_applied_it != _has_commit_applied.end()) {
-                    has_applied_it->second = applied;
-                }
-                _has_prepare_applied.erase(pid);
-                _prepared.erase(pid);
-                auto offset_it = _ongoing_map.find(pid);
-                if (offset_it != _ongoing_map.end()) {
-                    _ongoing_set.erase(offset_it->second.first);
-                    _ongoing_map.erase(pid);
-                }
-            }
-        } else {
-            auto last_offset = model::offset(b.last_offset());
-            auto ongoing_it = _ongoing_map.find(bid.pid);
-            if (ongoing_it != _ongoing_map.end()) {
-                if (ongoing_it->second.last < last_offset) {
-                    ongoing_it->second.last = last_offset;
-                }
-            } else {
-                auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
-                _ongoing_map.emplace(bid.pid, tx_range {
-                    .pid = bid.pid,
-                    .first = base_offset,
-                    .last = model::offset(last_offset)
-                });
-                _ongoing_set.insert(base_offset);
-                _estimated.erase(bid.pid);
-            }
-        }
+        return;
     }
     
-    _insync_offset = b.last_offset();
+    if (hdr.type == raft::data_batch_type && hdr.attrs.is_control()) {
+        vassert(b.record_count() == 1, "control record must contain a single record");
+        auto r = b.copy_records();
+        auto& record = *r.begin();
+        auto key = record.release_key();
+        kafka::request_reader key_reader(std::move(key));
+        auto version = model::control_record_version(key_reader.read_int16());
+        vassert(version == model::current_control_record_version, "unknown control record version");
+        
+        auto fence_it = _fence_pid_epoch.find(id(pid));
+        if (fence_it == _fence_pid_epoch.end()) {
+            _fence_pid_epoch.emplace(id(pid), epoch(pid));
+        } else if (fence_it->second < epoch(pid)) {
+            fence_it->second=epoch(pid);
+            _expected.erase(id(pid));
+        } else if (fence_it->second > epoch(pid)) {
+            return;
+        }
+        
+        auto crt = model::control_record_type(key_reader.read_int16());
+        if (crt == model::control_record_type::tx_abort) {
+            // TODO: update fencing
+            _prepared.erase(pid);
+            _expected.erase(id(pid));
+            _has_prepare_applied.erase(pid);
+            _has_commit_applied.erase(pid);
+            auto offset_it = _ongoing_map.find(pid);
+            if (offset_it != _ongoing_map.end()) {
+                _aborted.push_back(offset_it->second);
+                _ongoing_set.erase(offset_it->second.first);
+                _ongoing_map.erase(pid);
+            }
+        }
+        
+        if (crt == model::control_record_type::tx_commit) {
+            auto applied = true;
+            if (!_prepared.contains(pid)) {
+                applied = false;
+            }
+            // TODO: check if already aborted
+            // TODO: check fencing
+            auto has_applied_it = _has_commit_applied.find(pid);
+            if (has_applied_it != _has_commit_applied.end()) {
+                has_applied_it->second = applied;
+            }
+            _has_prepare_applied.erase(pid);
+            _prepared.erase(pid);
+            auto offset_it = _ongoing_map.find(pid);
+            if (offset_it != _ongoing_map.end()) {
+                _ongoing_set.erase(offset_it->second.first);
+                _ongoing_map.erase(pid);
+            }
+        }
+        return;
+    }
     
-    return ss::now();
+    if (hdr.type == raft::data_batch_type) {
+        auto last_offset = model::offset(b.last_offset());
+        auto ongoing_it = _ongoing_map.find(bid.pid);
+        if (ongoing_it != _ongoing_map.end()) {
+            if (ongoing_it->second.last < last_offset) {
+                ongoing_it->second.last = last_offset;
+            }
+        } else {
+            auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
+            _ongoing_map.emplace(bid.pid, tx_range {
+                .pid = bid.pid,
+                .first = base_offset,
+                .last = model::offset(last_offset)
+            });
+            _ongoing_set.insert(base_offset);
+            _estimated.erase(bid.pid);
+        }
+    }
 }
 
 void tx_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
