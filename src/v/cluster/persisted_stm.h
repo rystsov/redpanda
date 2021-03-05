@@ -83,8 +83,10 @@ protected:
 
     ss::future<> catchup(model::term_id, model::offset);
     ss::future<bool> is_caught_up(model::timeout_clock::duration);
+    ss::future<bool> sync(model::timeout_clock::duration);
     
     mutex _op_lock;
+    std::vector<ss::lw_shared_ptr<expiring_promise<bool>>> _sync_waiters;
     ss::shared_promise<> _resolved_when_snapshot_hydrated;
     model::offset _last_snapshot_offset;
     bool _is_catching_up{false};

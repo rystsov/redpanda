@@ -77,6 +77,10 @@ public:
         }
     }
 
+    bool available() {
+        return _promise.available();
+    }
+
     void set_exception(std::exception_ptr&& ex) {
         if (_timer.cancel()) {
             _promise.set_exception(ex);

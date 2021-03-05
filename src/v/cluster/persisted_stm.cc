@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0
 
 #include "cluster/persisted_stm.h"
-#include "utils/expiring_promise.h"
 
 #include "cluster/logger.h"
 #include "raft/errc.h"
@@ -170,6 +169,46 @@ persisted_stm::is_caught_up(model::timeout_clock::duration timeout) {
 
     return is_caught->get_future_with_timeout(deadline, [](){ return false; });
 }
+
+ss::future<bool> 
+persisted_stm::sync(model::timeout_clock::duration timeout) {
+    if (!_c->is_leader()) {
+        return ss::make_ready_future<bool>(false);
+    }
+    if (_insync_term == _c->term()) {
+        return ss::make_ready_future<bool>(true);
+    }
+    if (_is_catching_up) {
+        auto deadline = model::timeout_clock::now() + timeout;
+        auto sync_waiter = ss::make_lw_shared<expiring_promise<bool>>();
+        _sync_waiters.push_back(sync_waiter);
+        return sync_waiter->get_future_with_timeout(deadline, [](){ return false; });
+    }
+    _is_catching_up = true;
+    auto term = _c->term();
+    return quorum_write_empty_batch(model::timeout_clock::now() + timeout).then([](auto r) {
+        if (r) {
+            return true;
+        }
+        return false;
+    }).handle_exception([]([[maybe_unused]] std::exception_ptr e){
+        return false;
+    }).then([this, term](auto is_synced) {
+        is_synced = is_synced && (term == _c->term());
+        if (is_synced) {
+            _insync_term = term;
+        }
+        for (auto& sync_waiter : _sync_waiters) {
+            if (!sync_waiter->available()) {
+                sync_waiter->set_value(is_synced);
+            }
+        }
+        _sync_waiters.clear();
+        return is_synced;
+    });
+}
+
+// 
 
 ss::future<>
 persisted_stm::catchup() {
