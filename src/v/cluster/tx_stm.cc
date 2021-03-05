@@ -332,9 +332,32 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
 
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
-  model::batch_identity bid,
+  [[maybe_unused]] model::batch_identity bid,
   model::record_batch_reader&& br,
   [[maybe_unused]] raft::replicate_options opts) {
+    
+    /*return sync(2'000ms).then([this](auto is_ready) {
+        if (!is_ready) {
+            return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error));
+        }
+        if (_mem_state.term != _insync_term) {
+            _mem_state = mem_state {
+                .term = _insync_term
+            };
+        }
+        return _c->replicate(_mem_state.term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack)).then([](auto r) {
+            if (!r) {
+                return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+            }
+            auto b = r.value();
+            return checked<raft::replicate_result, kafka::error_code>(b);
+        });
+    });*/
+
+    ///////////////////////////////////////////
+    
+    vlog(clusterlog.info, "SHAI: produce/replicate");
+    
     auto is_ready = co_await sync(2'000ms);
     if (!is_ready) {
         co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
@@ -344,6 +367,30 @@ tx_stm::replicate(
             .term = _insync_term
         };
     }
+
+    vlog(clusterlog.info, "SHAI: replicating");
+    auto r = co_await _c->replicate(_mem_state.term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    if (!r) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    auto b = r.value();
+    co_return checked<raft::replicate_result, kafka::error_code>(b);
+
+
+    //////////////////////////////////////////////////////////
+
+
+    /*auto is_ready = co_await sync(2'000ms);
+    if (!is_ready) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    if (_mem_state.term != _insync_term) {
+        _mem_state = mem_state {
+            .term = _insync_term
+        };
+    }
+
+    vlog(clusterlog.info, "SHAI: synced");
     
     // <fencing>
     auto fence_it = _log_state.fence_pid_epoch.find(id(bid.pid));
@@ -353,6 +400,8 @@ tx_stm::replicate(
         }
     }
     // </fencing>
+
+    vlog(clusterlog.info, "SHAI: fenced");
 
     // <check> if there is there is inflight abort
     //         or tx already is in prepared state
@@ -388,7 +437,10 @@ tx_stm::replicate(
     // to invalidate the post processing
     auto term = _mem_state.term;
 
+    vlog(clusterlog.info, "SHAI: replicating");
+
     auto r = co_await _c->replicate(term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    vlog(clusterlog.info, "SHAI: got r");
     if (!r) {
         if (_mem_state.estimated.contains(bid.pid)) {
             // unexpected situation preventing tx from
@@ -397,6 +449,8 @@ tx_stm::replicate(
         }
         co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
+
+    vlog(clusterlog.info, "SHAI: postprocess");
 
     auto b = r.value();
 
@@ -411,7 +465,7 @@ tx_stm::replicate(
         _mem_state.tx_starts.insert(base_offset);
         _mem_state.estimated.erase(bid.pid);
     }
-    co_return checked<raft::replicate_result, kafka::error_code>(b);
+    co_return checked<raft::replicate_result, kafka::error_code>(b);*/
 }
 
 std::optional<model::offset>
@@ -465,6 +519,7 @@ tx_stm::aborted_transactions(model::offset from, model::offset to) {
 void tx_stm::compact_snapshot() { }
 
 ss::future<> tx_stm::apply(model::record_batch b) {
+    vlog(clusterlog.info, "SHAI: applying");
     auto offset = b.last_offset();
     replay(std::move(b));
     _insync_offset = offset;
@@ -472,11 +527,13 @@ ss::future<> tx_stm::apply(model::record_batch b) {
 }
 
 void tx_stm::replay(model::record_batch&& b) {
+    vlog(clusterlog.info, "SHAI: replaying");
     const auto& hdr = b.header();
     auto bid = model::batch_identity::from(hdr);
     auto pid = bid.pid;
 
     if (hdr.type == tx_fence_batch_type) {
+        vlog(clusterlog.info, "SHAI: fence batch");
         auto fence_it = _log_state.fence_pid_epoch.find(id(pid));
         if (fence_it == _log_state.fence_pid_epoch.end()) {
             _log_state.fence_pid_epoch.emplace(id(pid), epoch(pid));
@@ -487,6 +544,7 @@ void tx_stm::replay(model::record_batch&& b) {
     }
     
     if (hdr.type == tx_prepare_batch_type) {
+        vlog(clusterlog.info, "SHAI: prepare batch");
         auto has_applied_it = _mem_state.has_prepare_applied.find(pid);
         
         auto fence_it = _log_state.fence_pid_epoch.find(id(pid));
@@ -539,6 +597,7 @@ void tx_stm::replay(model::record_batch&& b) {
     }
     
     if (hdr.attrs.is_control()) {
+        vlog(clusterlog.info, "SHAI: control batch");
         vassert(b.record_count() == 1, "control record must contain a single record");
         auto r = b.copy_records();
         auto& record = *r.begin();
@@ -628,6 +687,7 @@ void tx_stm::replay(model::record_batch&& b) {
     }
     
     if (hdr.attrs.is_transactional()) {
+        vlog(clusterlog.info, "SHAI: transactional batch");
         auto last_offset = model::offset(b.last_offset());
         if (_log_state.aborted.contains(bid.pid)) {
             // log, vassert, ignore
