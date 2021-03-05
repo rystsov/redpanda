@@ -88,18 +88,30 @@ private:
 
     ////////////////////////////////////
 
-    absl::flat_hash_map<producer_id, model::producer_identity> _id_map;
-    absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
+    struct log_state {
+        // f(snapshot)
+        absl::flat_hash_map<producer_id, model::producer_identity> id_map;
+        // snapshot
+        absl::flat_hash_map<producer_id, producer_epoch> fence_pid_epoch;
+        absl::flat_hash_map<model::producer_identity, tx_range> ongoing_map;
+        absl::btree_set<model::offset> ongoing_set;
+        absl::btree_set<model::producer_identity> prepared;
+        absl::flat_hash_map<model::producer_identity, tx_range> aborted;
+    };
 
-    absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
-    absl::flat_hash_map<model::producer_identity, bool> _has_prepare_applied;
-    absl::flat_hash_map<model::producer_identity, bool> _has_commit_applied;
-    
-    absl::flat_hash_map<producer_id, producer_epoch> _fence_pid_epoch;
-    absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
-    absl::btree_set<model::offset> _ongoing_set;
-    absl::btree_set<model::producer_identity> _prepared;
-    absl::flat_hash_map<model::producer_identity, tx_range> _aborted;
+    struct mem_state {
+        model::term_id term{-1};
+        absl::flat_hash_map<model::producer_identity, tx_range> ongoing_map;
+        absl::btree_set<model::offset> ongoing_set;
+        absl::flat_hash_map<model::producer_identity, model::term_id> expected;
+        absl::flat_hash_map<model::producer_identity, model::offset> estimated;
+        absl::flat_hash_map<producer_id, model::producer_identity> id_map;
+        absl::flat_hash_map<model::producer_identity, bool> has_prepare_applied;
+        absl::flat_hash_map<model::producer_identity, bool> has_commit_applied;
+    };
+
+    log_state _log_state;
+    mem_state _mem_state;
 
 
     // {expected}:  map  pid -> term
