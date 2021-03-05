@@ -168,17 +168,10 @@ tx_stm::begin_tx(model::producer_identity pid) {
     // tx coordinator should begin only after re(commit) or re(abort)
     // todo: add logging or vassert or wipe all tx state depending on
     //       the config
-    if (_log_state.id_map.contains(id(pid))) {
-        co_return std::nullopt;
-    }
-    if (_mem_state.id_map.contains(id(pid))) {
-        co_return std::nullopt;
-    }
     if (_mem_state.expected.contains(pid)) {
         co_return std::nullopt;
     }
-    _mem_state.id_map.emplace(id(pid), pid);
-    _mem_state.expected.emplace(pid, _mem_state.term);
+    _mem_state.expected.insert(pid);
     // </check>
 
     co_return std::optional<model::term_id>(_mem_state.term);
@@ -205,16 +198,9 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
         };
     }
 
-    auto id_it = _mem_state.id_map.find(id(pid));
-    if (id_it != _mem_state.id_map.end()) {
-        auto mem_pid = id_it->second;
-        if (epoch(mem_pid) <= epoch(pid)) {
-            // preventing in-memory tx from prepare
-            // if it's already prepared abort will
-            // take during replay
-            _mem_state.expected.erase(id_it->second);
-        }
-    }
+    // preventing prepare and replicte once we
+    // know we're going to abort the tx
+    _mem_state.expected.erase(pid);
 
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_abort);
 
@@ -329,11 +315,6 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
     // commit aborted => error (log, vassert, ignore)
     // commit ongoing => error (log, vassert, ignore)
 
-    if (_mem_state.has_commit_applied.contains(pid)) {
-        co_return tx_errc::conflict;
-    }
-    _mem_state.has_commit_applied.emplace(pid, false);
-
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_commit);
 
     auto r = co_await _c->replicate(
@@ -346,18 +327,6 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
     }
     co_await wait(model::offset(r.value().last_offset()), model::no_timeout);
 
-    auto has_commit_it = _mem_state.has_commit_applied.find(pid);
-    if (has_commit_it == _mem_state.has_commit_applied.end()) {
-        co_return tx_errc::timeout;
-    }
-    auto applied = has_commit_it->second;
-    _mem_state.has_commit_applied.erase(pid);
-
-    if (!applied) {
-        // exceptional situation commit can not be rejected
-        co_return tx_errc::conflict;
-    }
-    
     co_return tx_errc::success;
 }
 
@@ -411,11 +380,15 @@ tx_stm::replicate(
     }
     // </check>
 
-    if (!_log_state.ongoing_map.contains(bid.pid) && !_mem_state.estimated.contains(bid.pid)) {
+    if (!_mem_state.tx_start.contains(bid.pid)) {
         _mem_state.estimated.emplace(bid.pid, _insync_offset);
     }
 
-    auto r = co_await _c->replicate(_mem_state.term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    // after continuation _mem_state may change so caching term
+    // to invalidate the post processing
+    auto term = _mem_state.term;
+
+    auto r = co_await _c->replicate(term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
     if (!r) {
         if (_mem_state.estimated.contains(bid.pid)) {
             // unexpected situation preventing tx from
@@ -426,20 +399,16 @@ tx_stm::replicate(
     }
 
     auto b = r.value();
+
+    if (_mem_state.term != term) {
+        co_return checked<raft::replicate_result, kafka::error_code>(b);
+    }
+
     auto last_offset = model::offset(b.last_offset());
-    auto ongoing_it = _mem_state.ongoing_map.find(bid.pid);
-    if (ongoing_it != _mem_state.ongoing_map.end()) {
-        if (ongoing_it->second.last < last_offset) {
-            ongoing_it->second.last = last_offset;
-        }
-    } else {
+    if (!_mem_state.tx_start.contains(bid.pid)) {
         auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
-        _mem_state.ongoing_map.emplace(bid.pid, tx_range {
-            .pid = bid.pid,
-            .first = base_offset,
-            .last = model::offset(last_offset)
-        });
-        _mem_state.ongoing_set.insert(base_offset);
+        _mem_state.tx_start.emplace(bid.pid, base_offset);
+        _mem_state.tx_starts.insert(base_offset);
         _mem_state.estimated.erase(bid.pid);
     }
     co_return checked<raft::replicate_result, kafka::error_code>(b);
@@ -453,12 +422,12 @@ tx_stm::tx_lso() {
         min = std::optional<model::offset>(*_log_state.ongoing_set.begin());
     }
 
-    if (!_mem_state.ongoing_set.empty()) {
+    if (!_mem_state.tx_starts.empty()) {
         if (!min.has_value()) {
-            min = std::optional<model::offset>(*_mem_state.ongoing_set.begin());
+            min = std::optional<model::offset>(*_mem_state.tx_starts.begin());
         }
-        if (*_mem_state.ongoing_set.begin() < min.value()) {
-            min = std::optional<model::offset>(*_mem_state.ongoing_set.begin());
+        if (*_mem_state.tx_starts.begin() < min.value()) {
+            min = std::optional<model::offset>(*_mem_state.tx_starts.begin());
         }
     }
 
@@ -564,8 +533,12 @@ void tx_stm::replay(model::record_batch&& b) {
         }
         return;
     }
+
+    if (hdr.type != raft::data_batch_type) {
+        return;
+    }
     
-    if (hdr.type == raft::data_batch_type && hdr.attrs.is_control()) {
+    if (hdr.attrs.is_control()) {
         vassert(b.record_count() == 1, "control record must contain a single record");
         auto r = b.copy_records();
         auto& record = *r.begin();
@@ -596,23 +569,13 @@ void tx_stm::replay(model::record_batch&& b) {
             }
 
             if (!_log_state.prepared.contains(pid)) {
-                // it's a tombstone abort to force finish ongoing txes
-                // or a re(abort) of the 
-
-                if (_log_state.id_map.contains(id(pid))) {
-
-                }
-                
-                
                 // we either trying to abort an already
                 // comitted tx or a tx which was never
                 // prepared both
                 // this is an invariant violation:
                 // log, vassert or ignore
                 // so far falling down to ignore
-            }
-            
-
+            }        
 
             // soly rely on log data because up to this
             // point (apply(abort)) all writes which came
@@ -625,22 +588,34 @@ void tx_stm::replay(model::record_batch&& b) {
                 _log_state.ongoing_map.erase(pid);
             }
 
+            // cleaning mem state
             _mem_state.expected.erase(pid);
+            _mem_state.estimated.erase(pid);
             _mem_state.has_prepare_applied.erase(pid);
-            _mem_state.has_commit_applied.erase(pid);
+            auto tx_start_it = _mem_state.tx_start.find(pid);
+            if (tx_start_it != _mem_state.tx_start.end()) {
+                _mem_state.tx_starts.erase(tx_start_it->second);
+                _mem_state.tx_start.erase(pid);
+            }
         }
         
         if (crt == model::control_record_type::tx_commit) {
-            auto applied = true;
-            if (!_log_state.prepared.contains(pid)) {
-                applied = false;
-            }
-            // TODO: check if already aborted
-            // TODO: check fencing
-            auto has_applied_it = _mem_state.has_commit_applied.find(pid);
-            if (has_applied_it != _mem_state.has_commit_applied.end()) {
-                has_applied_it->second = applied;
-            }
+            // commit prepared => ok
+            // commit empty => ok
+            // commit aborted => error (log, vassert, ignore)
+            // commit ongoing => error (log, vassert, ignore)
+
+            if (_log_state.aborted.contains(pid)) {
+                // log, vassert, ignore
+            } else if (_log_state.prepared.contains(pid)) {
+                // ok
+            } else if (_log_state.ongoing_map.contains(pid)) {
+                // log, vassert, ignore
+            } 
+
+            // mem.forget(pid)
+            // log.forget(pid)
+
             _mem_state.has_prepare_applied.erase(pid);
             _log_state.prepared.erase(pid);
             auto offset_it = _log_state.ongoing_map.find(pid);
@@ -652,8 +627,17 @@ void tx_stm::replay(model::record_batch&& b) {
         return;
     }
     
-    if (hdr.type == raft::data_batch_type) {
+    if (hdr.attrs.is_transactional()) {
         auto last_offset = model::offset(b.last_offset());
+        if (_log_state.aborted.contains(bid.pid)) {
+            // log, vassert, ignore
+            return;
+        }
+        if (_log_state.prepared.contains(bid.pid)) {
+            // log, vassert, ignore
+            return;
+        }
+
         auto ongoing_it = _log_state.ongoing_map.find(bid.pid);
         if (ongoing_it != _log_state.ongoing_map.end()) {
             if (ongoing_it->second.last < last_offset) {
@@ -677,6 +661,9 @@ void tx_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
     iobuf_parser data_parser(std::move(tx_ss_buf));
     auto data = reflection::adl<tx_snapshot>{}.from(data_parser);
 
+    for (auto& entry : data.fenced) {
+        _log_state.fence_pid_epoch.emplace(id(entry), epoch(entry));
+    }
     for (auto& entry : data.ongoing) {
         _log_state.ongoing_map.emplace(entry.pid, entry);
         _log_state.ongoing_set.insert(entry.first);
@@ -695,6 +682,12 @@ void tx_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
 stm_snapshot tx_stm::take_snapshot() {
     tx_snapshot tx_ss;
     
+    for (auto const& [k, v] : _log_state.fence_pid_epoch) {
+        tx_ss.fenced.push_back(model::producer_identity {
+            .id = k(),
+            .epoch = v()
+        });
+    }
     for (auto& entry : _log_state.ongoing_map) {
         tx_ss.ongoing.push_back(entry.second);
     }

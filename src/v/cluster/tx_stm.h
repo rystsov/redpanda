@@ -36,7 +36,7 @@ class tx_stm final
 public:
     static constexpr const int8_t supported_version = 0;
     using producer_id = named_type<int64_t, struct producer_identity_id>;
-    using producer_epoch = named_type<int64_t, struct producer_identity_epoch>;
+    using producer_epoch = named_type<int16_t, struct producer_identity_epoch>;
 
     struct tx_range {
         model::producer_identity pid;
@@ -45,6 +45,7 @@ public:
     };
 
     struct tx_snapshot {
+        std::vector<model::producer_identity> fenced;
         std::vector<tx_range> ongoing;
         std::vector<model::producer_identity> prepared;
         std::vector<tx_range> aborted;
@@ -89,9 +90,6 @@ private:
     ////////////////////////////////////
 
     struct log_state {
-        // f(snapshot)
-        absl::flat_hash_map<producer_id, model::producer_identity> id_map;
-        // snapshot
         absl::flat_hash_map<producer_id, producer_epoch> fence_pid_epoch;
         absl::flat_hash_map<model::producer_identity, tx_range> ongoing_map;
         absl::btree_set<model::offset> ongoing_set;
@@ -101,13 +99,11 @@ private:
 
     struct mem_state {
         model::term_id term{-1};
-        absl::flat_hash_map<model::producer_identity, tx_range> ongoing_map;
-        absl::btree_set<model::offset> ongoing_set;
-        absl::flat_hash_map<model::producer_identity, model::term_id> expected;
+        absl::flat_hash_map<model::producer_identity, model::offset> tx_start;
+        absl::btree_set<model::offset> tx_starts;
         absl::flat_hash_map<model::producer_identity, model::offset> estimated;
-        absl::flat_hash_map<producer_id, model::producer_identity> id_map;
+        absl::btree_set<model::producer_identity> expected;
         absl::flat_hash_map<model::producer_identity, bool> has_prepare_applied;
-        absl::flat_hash_map<model::producer_identity, bool> has_commit_applied;
     };
 
     log_state _log_state;
