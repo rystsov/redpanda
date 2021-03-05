@@ -129,7 +129,7 @@ static inline tx_stm::producer_epoch epoch(model::producer_identity pid) {
 
 ss::future<std::optional<model::term_id>>
 tx_stm::begin_tx(model::producer_identity pid) {
-    auto is_ready = co_await is_caught_up(2'000ms);
+    auto is_ready = co_await sync(2'000ms);
     if (!is_ready) {
         co_return std::nullopt;
     }
@@ -153,9 +153,19 @@ tx_stm::begin_tx(model::producer_identity pid) {
         }
     }
     if (epoch(pid) != fence_it->second) {
+        // while we were another fence has passed and cut us off
+        // e.g. abort
         co_return std::nullopt;
     }
     // </fencing>
+
+    // if has ongoing with id(pid) => timeout
+    // ongoing:
+    //  * from log
+    //  * from mem(term)
+    // insync_term != term => wipe mem (either in log or never will be)
+
+
 
     // <check>
     // if this pid is in use, if check passes it's a violation
@@ -186,7 +196,7 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
     // to force it to commit
     // </fencing>
 
-    auto is_ready = co_await is_caught_up(2'000ms);
+    auto is_ready = co_await sync(2'000ms);
     if (!is_ready) {
         co_return tx_errc::timeout;
     }
@@ -215,9 +225,11 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
 
 ss::future<tx_errc>
 tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
-    // we do not sync because even if the state is obsolete
-    // replicate won't pass becasue of the etag
-    
+    auto is_ready = co_await sync(2'000ms);
+    if (!is_ready) {
+        co_return tx_errc::timeout;
+    }
+
     // <check>
     //    if already prepared 
     //    or if can't prepare at all
