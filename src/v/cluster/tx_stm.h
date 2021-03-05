@@ -88,12 +88,14 @@ private:
 
     ////////////////////////////////////
 
-    absl::flat_hash_map<producer_id, model::term_id> _expected;
+    absl::flat_hash_map<producer_id, model::producer_identity> _id_map;
+    absl::flat_hash_map<model::producer_identity, model::term_id> _expected;
+
     absl::flat_hash_map<model::producer_identity, model::offset> _estimated;
     absl::flat_hash_map<model::producer_identity, bool> _has_prepare_applied;
     absl::flat_hash_map<model::producer_identity, bool> _has_commit_applied;
-    absl::flat_hash_map<producer_id, producer_epoch> _fence_pid_epoch;
     
+    absl::flat_hash_map<producer_id, producer_epoch> _fence_pid_epoch;
     absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;
     absl::btree_set<model::producer_identity> _prepared;

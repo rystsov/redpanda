@@ -127,6 +127,54 @@ static inline tx_stm::producer_epoch epoch(model::producer_identity pid) {
     return tx_stm::producer_epoch(pid.epoch);
 }
 
+ss::future<std::optional<model::term_id>>
+tx_stm::begin_tx(model::producer_identity pid) {
+    auto is_ready = co_await is_caught_up(2'000ms);
+    if (!is_ready) {
+        co_return std::nullopt;
+    }
+
+    // <fencing>
+    auto fence_it = _fence_pid_epoch.find(id(pid));
+    if (fence_it == _fence_pid_epoch.end() || epoch(pid) > fence_it->second) {
+        // set in memory
+        auto batch = make_fence_control_record_batch(pid);
+        auto r = co_await _c->replicate(
+            _insync_term,
+            model::make_memory_record_batch_reader(std::move(batch)),
+            raft::replicate_options(raft::consistency_level::quorum_ack));
+        if (!r) {
+            co_return std::nullopt;
+        }
+        co_await wait(model::offset(r.value().last_offset()), model::no_timeout);
+        fence_it = _fence_pid_epoch.find(id(pid));
+        if (fence_it == _fence_pid_epoch.end()) {
+            co_return std::nullopt;
+        }
+    }
+    if (epoch(pid) != fence_it->second) {
+        co_return std::nullopt;
+    }
+    // </fencing>
+
+    // <check>
+    // if this pid is in use, if check passes it's a violation
+    // tx coordinator should begin only after re(commit) or re(abort)
+    // todo: add logging or vassert or wipe all tx state depending on
+    //       the config
+    if (_id_map.contains(id(pid))) {
+        co_return std::nullopt;
+    }
+    if (_expected.contains(pid)) {
+        co_return std::nullopt;
+    }
+    _id_map.emplace(id(pid), pid);
+    _expected.emplace(pid, _insync_term);
+    // </check>
+
+    co_return std::optional<model::term_id>(_insync_term);
+}
+
 // called stricted after a tx was canceled on the coordinator
 // the sole purpose is to put tx_range into the list of aborted txes
 // and to fence off the old epoch
@@ -141,6 +189,12 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
     auto is_ready = co_await is_caught_up(2'000ms);
     if (!is_ready) {
         co_return tx_errc::timeout;
+    }
+
+    auto id_it = _id_map.find(id(pid));
+    if (id_it != _id_map.end()) {
+        // after erase "old" pid can't prepare & replicate
+        _expected.erase(id_it->second);
     }
 
     auto batch = make_control_record_batch(pid, model::control_record_type::tx_abort);
@@ -161,6 +215,24 @@ tx_stm::abort_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_c
 
 ss::future<tx_errc>
 tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_identity pid, [[maybe_unused]] model::timeout_clock::time_point timeout) {
+    // we do not sync because even if the state is obsolete
+    // replicate won't pass becasue of the etag
+    
+    // <check>
+    //    if already prepared 
+    //    or if can't prepare at all
+    if (_prepared.contains(pid)) {
+        co_return tx_errc::success;
+    }
+    auto expected_it = _expected.find(pid);
+    if (expected_it == _expected.end()) {
+        co_return tx_errc::conflict;
+    }
+    if (expected_it->second != etag) {
+        co_return tx_errc::conflict;
+    }
+    // </check>
+    
     // <fencing>
     auto fence_it = _fence_pid_epoch.find(id(pid));
     if (fence_it != _fence_pid_epoch.end()) {
@@ -169,19 +241,6 @@ tx_stm::prepare_tx(model::term_id etag, model::partition_id tm, model::producer_
         }
     }
     // </fencing>
-    
-    // <optimization>
-    if (_prepared.contains(pid)) {
-        co_return tx_errc::success;
-    }
-    auto expected_it = _expected.find(id(pid));
-    if (expected_it == _expected.end()) {
-        co_return tx_errc::conflict;
-    }
-    if (expected_it->second != etag) {
-        co_return tx_errc::conflict;
-    }
-    // </optimization>
 
     if (_has_prepare_applied.contains(pid)) {
         co_return tx_errc::conflict;
@@ -259,46 +318,81 @@ tx_stm::commit_tx(model::producer_identity pid, [[maybe_unused]] model::timeout_
     co_return tx_errc::success;
 }
 
-ss::future<std::optional<model::term_id>>
-tx_stm::begin_tx(model::producer_identity pid) {
+ss::future<checked<raft::replicate_result, kafka::error_code>>
+tx_stm::replicate(
+  model::batch_identity bid,
+  model::record_batch_reader&& br,
+  [[maybe_unused]] raft::replicate_options opts) {
     auto is_ready = co_await is_caught_up(2'000ms);
     if (!is_ready) {
-        co_return std::nullopt;
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
-
-    // can't begin a tx if there is another tx with the
-    // same id is going on
-
+    
     // <fencing>
-    auto fence_it = _fence_pid_epoch.find(id(pid));
-    if (fence_it == _fence_pid_epoch.end() || epoch(pid) > fence_it->second) {
-        auto batch = make_fence_control_record_batch(pid);
-        auto r = co_await _c->replicate(
-            _insync_term,
-            model::make_memory_record_batch_reader(std::move(batch)),
-            raft::replicate_options(raft::consistency_level::quorum_ack));
-        if (!r) {
-            co_return std::nullopt;
+    auto fence_it = _fence_pid_epoch.find(id(bid.pid));
+    if (fence_it != _fence_pid_epoch.end()) {
+        if (epoch(bid.pid) < fence_it->second) {
+            co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
         }
-        co_await wait(model::offset(r.value().last_offset()), model::no_timeout);
-        fence_it = _fence_pid_epoch.find(id(pid));
-        if (fence_it == _fence_pid_epoch.end()) {
-            co_return std::nullopt;
-        }
-    }
-    if (epoch(pid) != fence_it->second) {
-        co_return std::nullopt;
     }
     // </fencing>
-
-    // <optimization>
-    if (_expected.find(id(pid)) != _expected.end()) {
-        co_return std::nullopt;
+    
+    // <check> if there is there is inflight abort
+    //         or tx already is in prepared state
+    //         or if term has changes and state is stale
+    auto term_it = _expected.find(bid.pid);
+    if (term_it == _expected.end()) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
-    _expected.emplace(id(pid), _insync_term);
-    // </optimization>
+    if (term_it->second != _insync_term) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    // </check>
+    
+    // <check> _estimated has value when there is a follow up produce
+    //         when first hasn't finished yet, since we use overwrite 
+    //         ack=1 in-tx produce replicate should be very fast and
+    //         this is semi impossible situation
+    if (_estimated.contains(bid.pid)) {
+        // unexpected situation preventing tx from
+        // preparing / comitting / replicating
+        _expected.erase(bid.pid);
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    // </check>
 
-    co_return std::optional<model::term_id>(_insync_term);
+    if (!_ongoing_map.contains(bid.pid) && !_estimated.contains(bid.pid)) {
+        _estimated.emplace(bid.pid, _insync_offset);
+    }
+
+    auto r = co_await _c->replicate(term_it->second, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    if (!r) {
+        if (_estimated.contains(bid.pid)) {
+            // unexpected situation preventing tx from
+            // preparing / comitting / replicating
+            _expected.erase(bid.pid);
+        }
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+
+    auto b = r.value();
+    auto last_offset = model::offset(b.last_offset());
+    auto ongoing_it = _ongoing_map.find(bid.pid);
+    if (ongoing_it != _ongoing_map.end()) {
+        if (ongoing_it->second.last < last_offset) {
+            ongoing_it->second.last = last_offset;
+        }
+    } else {
+        auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
+        _ongoing_map.emplace(bid.pid, tx_range {
+            .pid = bid.pid,
+            .first = base_offset,
+            .last = model::offset(last_offset)
+        });
+        _ongoing_set.insert(base_offset);
+        _estimated.erase(bid.pid);
+    }
+    co_return checked<raft::replicate_result, kafka::error_code>(b);
 }
 
 std::optional<model::offset>
@@ -340,56 +434,7 @@ tx_stm::aborted_transactions(model::offset from, model::offset to) {
     return result;
 }
 
-ss::future<checked<raft::replicate_result, kafka::error_code>>
-tx_stm::replicate(
-  model::batch_identity bid,
-  model::record_batch_reader&& br,
-  [[maybe_unused]] raft::replicate_options opts) {
-    auto is_ready = co_await is_caught_up(2'000ms);
-    if (!is_ready) {
-        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
-    }
-    
-    auto term = _expected.find(id(bid.pid));
-    if (term == _expected.end()) {
-        // TODO: sane error
-        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
-    }
-    
-    if (_estimated.contains(bid.pid)) {
-        // TODO: sane error
-        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
-    }
 
-    if (!_ongoing_map.contains(bid.pid) && !_estimated.contains(bid.pid)) {
-        _estimated.emplace(bid.pid, _insync_offset);
-    }
-
-    auto r = co_await _c->replicate(term->second, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
-    if (!r) {
-        // TODO: check that failed replicate lead to aborted tx
-        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
-    }
-
-    auto b = r.value();
-    auto last_offset = model::offset(b.last_offset());
-    auto ongoing_it = _ongoing_map.find(bid.pid);
-    if (ongoing_it != _ongoing_map.end()) {
-        if (ongoing_it->second.last < last_offset) {
-            ongoing_it->second.last = last_offset;
-        }
-    } else {
-        auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
-        _ongoing_map.emplace(bid.pid, tx_range {
-            .pid = bid.pid,
-            .first = base_offset,
-            .last = model::offset(last_offset)
-        });
-        _ongoing_set.insert(base_offset);
-        _estimated.erase(bid.pid);
-    }
-    co_return checked<raft::replicate_result, kafka::error_code>(b);
-}
 
 void tx_stm::compact_snapshot() { }
 
@@ -411,7 +456,6 @@ void tx_stm::replay(model::record_batch&& b) {
             _fence_pid_epoch.emplace(id(pid), epoch(pid));
         } else if (fence_it->second < epoch(pid)) {
             fence_it->second=epoch(pid);
-            _expected.erase(id(pid));
         }
         return;
     }
@@ -424,7 +468,6 @@ void tx_stm::replay(model::record_batch&& b) {
             _fence_pid_epoch.emplace(id(pid), epoch(pid));
         } else if (fence_it->second < epoch(pid)) {
             fence_it->second=epoch(pid);
-            _expected.erase(id(pid));
         } else if (fence_it->second > epoch(pid)) {
             if (has_applied_it != _has_prepare_applied.end()) {
                 has_applied_it->second = false;
@@ -432,7 +475,7 @@ void tx_stm::replay(model::record_batch&& b) {
             return;
         }
         
-        _expected.erase(id(pid));
+        _expected.erase(pid);
         _prepared.insert(pid);
         // TODO: check if already aborted
         // TODO: check fencing
@@ -457,7 +500,6 @@ void tx_stm::replay(model::record_batch&& b) {
             _fence_pid_epoch.emplace(id(pid), epoch(pid));
         } else if (fence_it->second < epoch(pid)) {
             fence_it->second=epoch(pid);
-            _expected.erase(id(pid));
         } else if (fence_it->second > epoch(pid)) {
             return;
         }
@@ -466,7 +508,7 @@ void tx_stm::replay(model::record_batch&& b) {
         if (crt == model::control_record_type::tx_abort) {
             // TODO: update fencing
             _prepared.erase(pid);
-            _expected.erase(id(pid));
+            _expected.erase(pid);
             _has_prepare_applied.erase(pid);
             _has_commit_applied.erase(pid);
             auto offset_it = _ongoing_map.find(pid);
