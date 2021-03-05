@@ -465,20 +465,25 @@ void tx_stm::replay(model::record_batch&& b) {
         
         auto fence_it = _fence_pid_epoch.find(id(pid));
         if (fence_it == _fence_pid_epoch.end()) {
+            // todo: add loggin imposible situation
             _fence_pid_epoch.emplace(id(pid), epoch(pid));
         } else if (fence_it->second < epoch(pid)) {
+            // todo: add loggin imposible situation
             fence_it->second=epoch(pid);
         } else if (fence_it->second > epoch(pid)) {
-            if (has_applied_it != _has_prepare_applied.end()) {
-                has_applied_it->second = false;
-            }
+            // removing expected prevents follow up
+            // replicates
+            _expected.erase(pid);
             return;
         }
-        
-        _expected.erase(pid);
-        _prepared.insert(pid);
+
         // TODO: check if already aborted
-        // TODO: check fencing
+
+        // filtering out a follow up prepare
+        if (!_prepared.contains(pid)) {
+            _prepared.insert(pid);
+        }
+        _expected.erase(pid);
         
         if (has_applied_it != _has_prepare_applied.end()) {
             has_applied_it->second = true;
