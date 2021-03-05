@@ -370,6 +370,7 @@ tx_stm::replicate(
 
     vlog(clusterlog.info, "SHAI: replicating");
     auto r = co_await _c->replicate(_mem_state.term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    vlog(clusterlog.info, "SHAI: never seen");
     if (!r) {
         co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
     }
