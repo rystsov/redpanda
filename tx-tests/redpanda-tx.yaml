@@ -1,0 +1,36 @@
+organization: "vectorized"
+cluster_id: "cluster0"
+
+redpanda:
+  developer_mode: true
+  data_directory: "/home/rystsov/vectorized/redpanda-single-node/data"
+  node_id: 0
+  rpc_server:
+    address: "0.0.0.0"
+    port: 33145
+  kafka_api:
+    address: "0.0.0.0"
+    port: 9092
+  admin:
+    address: "0.0.0.0"
+    port: 9644
+
+  auto_create_topics_enabled: true
+  default_topic_partitions: 1
+  enable_idempotence: true
+  enable_transactions: true
+
+rpk:
+  enable_usage_stats: false
+  tune_network: false
+  tune_disk_scheduler: false
+  tune_disk_nomerges: false
+  tune_disk_irq: false
+  tune_fstrim: false
+  tune_cpu: false
+  tune_aio_events: false
+  tune_clocksource: false
+  tune_swappiness: false
+  enable_memory_locking: false
+  tune_coredump: false
+  coredump_dir: "/home/rystsov/vectorized/redpanda-single-node/coredump"
