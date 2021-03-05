@@ -99,7 +99,7 @@ private:
     absl::flat_hash_map<model::producer_identity, tx_range> _ongoing_map;
     absl::btree_set<model::offset> _ongoing_set;
     absl::btree_set<model::producer_identity> _prepared;
-    std::vector<tx_range> _aborted;
+    absl::flat_hash_map<model::producer_identity, tx_range> _aborted;
 
 
     // {expected}:  map  pid -> term

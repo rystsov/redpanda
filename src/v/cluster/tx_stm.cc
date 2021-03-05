@@ -423,13 +423,13 @@ std::vector<tx_stm::tx_range>
 tx_stm::aborted_transactions(model::offset from, model::offset to) {
     std::vector<tx_stm::tx_range> result;
     for (auto& range : _aborted) {
-        if (range.last < from) {
+        if (range.second.last < from) {
             continue;
         }
-        if (range.first > to) {
+        if (range.second.first > to) {
             continue;
         }
-        result.push_back(range);
+        result.push_back(range.second);
     }
     return result;
 }
@@ -465,19 +465,26 @@ void tx_stm::replay(model::record_batch&& b) {
         
         auto fence_it = _fence_pid_epoch.find(id(pid));
         if (fence_it == _fence_pid_epoch.end()) {
-            // todo: add loggin imposible situation
+            // todo: add loggin since imposible situation
+            // kafka clients replicates after add_to_partition
+            // add_to_partition acks after begin
+            // begin updates fencing
             _fence_pid_epoch.emplace(id(pid), epoch(pid));
         } else if (fence_it->second < epoch(pid)) {
-            // todo: add loggin imposible situation
+            // todo: add loggin since imposible situation
+            // kafka clients replicates after add_to_partition
+            // add_to_partition acks after begin
+            // begin updates fencing
             fence_it->second=epoch(pid);
         } else if (fence_it->second > epoch(pid)) {
-            // removing expected prevents follow up
-            // replicates
             _expected.erase(pid);
             return;
         }
 
-        // TODO: check if already aborted
+        if (_aborted.contains(pid)) {
+            _expected.erase(pid);
+            return;
+        }
 
         // filtering out a follow up prepare
         if (!_prepared.contains(pid)) {
@@ -511,6 +518,11 @@ void tx_stm::replay(model::record_batch&& b) {
         
         auto crt = model::control_record_type(key_reader.read_int16());
         if (crt == model::control_record_type::tx_abort) {
+            // check if it's already aborted
+            if (_aborted.contains(pid)) {
+                return;
+            }
+            
             // TODO: update fencing
             _prepared.erase(pid);
             _expected.erase(pid);
@@ -518,7 +530,7 @@ void tx_stm::replay(model::record_batch&& b) {
             _has_commit_applied.erase(pid);
             auto offset_it = _ongoing_map.find(pid);
             if (offset_it != _ongoing_map.end()) {
-                _aborted.push_back(offset_it->second);
+                _aborted.emplace(pid, offset_it->second);
                 _ongoing_set.erase(offset_it->second.first);
                 _ongoing_map.erase(pid);
             }
@@ -579,7 +591,7 @@ void tx_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
         _prepared.insert(entry);
     }
     for (auto& entry : data.aborted) {
-        _aborted.push_back(entry);
+        _aborted.emplace(entry.pid, entry);
     }
     
     _last_snapshot_offset = data.offset;
@@ -596,7 +608,7 @@ stm_snapshot tx_stm::take_snapshot() {
         tx_ss.prepared.push_back(entry);
     }
     for (auto& entry : _aborted) {
-        tx_ss.aborted.push_back(entry);
+        tx_ss.aborted.push_back(entry.second);
     }
     tx_ss.offset = _insync_offset;
     
