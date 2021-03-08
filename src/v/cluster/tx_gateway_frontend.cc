@@ -478,6 +478,7 @@ tx_gateway_frontend::do_init_tm_tx(ss::shard_id shard, kafka::transactional_id t
               });
           }
 
+
           auto maybe_tx = stm->get_tx(tx_id);
 
           if (maybe_tx) {
@@ -762,6 +763,7 @@ tx_gateway_frontend::add_partition_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add
             make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
     }
 
+
     auto tx = maybe_tx.value();
 
     if (tx.pid != pid) {
@@ -829,7 +831,7 @@ tx_gateway_frontend::add_partition_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add
                     kafka::add_partitions_to_txn_partition_result res_partition;
                     res_partition.partition_index = req_partition;
                     // todo: use sane error code
-                    res_partition.error_code = kafka::error_code::unknown_server_error;
+                    res_partition.error_code = kafka::error_code::none;
                     res_topic.results.push_back(res_partition);
                 } else {
                     bfs.push_back(begin_tx(ntp, pid, timeout));
