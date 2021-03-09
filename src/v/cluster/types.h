@@ -99,8 +99,14 @@ struct init_tm_tx_reply {
     tx_errc ec;
 };
 
-struct begin_tx_request { };
-struct begin_tx_reply { };
+struct begin_tx_request {
+    model::ntp ntp;
+};
+struct begin_tx_reply {
+    model::ntp ntp;
+    model::term_id etag;
+    tx_errc ec;
+};
 struct prepare_tx_request {
     model::ntp ntp;
     model::term_id etag;
