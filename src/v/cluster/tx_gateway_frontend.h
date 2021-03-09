@@ -20,6 +20,7 @@
 #include "model/metadata.h"
 #include "cluster/metadata_cache.h"
 #include "seastarx.h"
+#include "cluster/tx_gateway.h"
 
 namespace cluster {
 
@@ -42,6 +43,7 @@ public:
         std::unique_ptr<cluster::controller>&);
 
     ss::future<std::optional<model::node_id>> get_tx_broker(ss::sstring);
+    ss::future<abort_tx_reply> abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
 
 private:
     [[maybe_unused]] ss::smp_service_group _ssg;
@@ -53,5 +55,9 @@ private:
     [[maybe_unused]] std::unique_ptr<cluster::controller>& _controller;
 
     ss::future<bool> try_create_tx_topic();
+    ss::future<abort_tx_reply> dispatch_abort_tx(model::node_id leader, model::ntp, model::producer_identity, model::timeout_clock::duration);
+    ss::future<abort_tx_reply> do_abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
+
+    friend tx_gateway;
 };
 } // namespace cluster

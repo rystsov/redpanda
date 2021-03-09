@@ -47,8 +47,8 @@ tx_gateway::commit_tx(commit_tx_request&&, rpc::streaming_context&) {
 }
 
 ss::future<abort_tx_reply>
-tx_gateway::abort_tx(abort_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<abort_tx_reply>(abort_tx_reply());
+tx_gateway::abort_tx(abort_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_abort_tx(request.ntp, request.pid, request.timeout);
 }
 
 ss::future<ping_tm_reply>
