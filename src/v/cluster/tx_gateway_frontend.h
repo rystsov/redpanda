@@ -48,7 +48,7 @@ public:
 
     ss::future<std::optional<model::node_id>> get_tx_broker(ss::sstring);
     ss::future<abort_tx_reply> abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
-    ss::future<prepare_tx_reply> prepare_tx(model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
+    ss::future<prepare_tx_reply> prepare_tx(model::ntp, model::term_id, model::partition_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_tx_reply> commit_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<init_tm_tx_reply> init_tm_tx(kafka::transactional_id, model::timeout_clock::duration);
     ss::future<kafka::add_partitions_to_txn_response_data> add_partition_to_tx(kafka::add_partitions_to_txn_request_data, model::timeout_clock::duration);
@@ -68,8 +68,8 @@ private:
     ss::future<bool> try_create_tx_topic();
     ss::future<abort_tx_reply> dispatch_abort_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<abort_tx_reply> do_abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
-    ss::future<prepare_tx_reply> dispatch_prepare_tx(model::node_id, model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
-    ss::future<prepare_tx_reply> do_prepare_tx(model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
+    ss::future<prepare_tx_reply> dispatch_prepare_tx(model::node_id, model::ntp, model::term_id, model::partition_id, model::producer_identity, model::timeout_clock::duration);
+    ss::future<prepare_tx_reply> do_prepare_tx(model::ntp, model::term_id, model::partition_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_tx_reply> dispatch_commit_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_tx_reply> do_commit_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<cluster::init_tm_tx_reply> dispatch_init_tm_tx(model::node_id, kafka::transactional_id, model::timeout_clock::duration);

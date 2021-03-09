@@ -73,7 +73,7 @@ tx_gateway_frontend::get_tx_broker([[maybe_unused]] ss::sstring key) {
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::timeout_clock::duration timeout) {
     auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
     
     if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
@@ -93,27 +93,28 @@ tx_gateway_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::prod
     auto _self = _controller->self();
 
     if (leader == _self) {
-        return do_prepare_tx(ntp, etag, pid, timeout);
+        return do_prepare_tx(ntp, etag, tm, pid, timeout);
     }
 
     vlog(clusterlog.trace, "dispatching prepare tx to {} from {}", leader, _self);
 
-    return dispatch_prepare_tx(leader.value(), ntp, etag, pid, timeout);
+    return dispatch_prepare_tx(leader.value(), ntp, etag, tm, pid, timeout);
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, model::term_id etag, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::timeout_clock::duration timeout) {
     return _connection_cache.local()
       .with_node_client<cluster::tx_gateway_client_protocol>(
         _controller->self(),
         ss::this_shard_id(),
         leader,
         timeout,
-        [ntp, etag, pid, timeout](tx_gateway_client_protocol cp) {
+        [ntp, etag, tm, pid, timeout](tx_gateway_client_protocol cp) {
             return cp.prepare_tx(
               prepare_tx_request{
                   .ntp = ntp,
                   .etag = etag,
+                  .tm = tm,
                   .pid = pid,
                   .timeout = timeout
                 },
@@ -134,7 +135,7 @@ tx_gateway_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, 
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::timeout_clock::duration timeout) {
     auto shard = _shard_table.local().shard_for(ntp);
 
     if (shard == std::nullopt) {
@@ -145,7 +146,7 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
     }
 
     return _partition_manager.invoke_on(
-      *shard, _ssg, [ntp, etag, pid, timeout](cluster::partition_manager& mgr) mutable {
+      *shard, _ssg, [ntp, etag, tm, pid, timeout](cluster::partition_manager& mgr) mutable {
           vlog(clusterlog.warn, "timeout {}", timeout);
           auto partition = mgr.get(ntp);
           if (!partition) {
@@ -165,7 +166,7 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
           }
 
           // ok, tx not found, timeout
-          return stm->prepare_tx(etag, pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
+          return stm->prepare_tx(etag, tm, pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
               return prepare_tx_reply {
                   .ec = ec
               };
@@ -574,7 +575,7 @@ ss::future<checked<cluster::tm_transaction, tx_errc>>
 tx_gateway_frontend::commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::tm_transaction tx, model::timeout_clock::duration timeout, ss::lw_shared_ptr<ss::promise<tx_errc>> outcome) {
     std::vector<ss::future<prepare_tx_reply>> pfs;
     for (auto rm : tx.partitions) {
-        pfs.push_back(prepare_tx(rm.ntp, rm.etag, tx.pid, timeout));
+        pfs.push_back(prepare_tx(rm.ntp, rm.etag, model::kafka_tx_ntp.tp.partition, tx.pid, timeout));
     }
 
     if (tx.status == tm_transaction::tx_status::ongoing) {
