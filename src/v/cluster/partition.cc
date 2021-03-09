@@ -38,6 +38,11 @@ partition::partition(consensus_ptr r)
               clusterlog, _raft.get(), config::shard_local_cfg());
             stm_manager->add_stm(_seq_stm);
         }
+        if (config::shard_local_cfg().enable_transactions.value()) {
+            _tx_stm = ss::make_shared<cluster::tx_stm>(
+              clusterlog, _raft.get(), config::shard_local_cfg());
+            stm_manager->add_stm(_tx_stm);
+        }
     }
 }
 
@@ -51,7 +56,9 @@ partition::replicate(
   model::batch_identity bid,
   model::record_batch_reader&& r,
   raft::replicate_options opts) {
-    if (bid.has_idempotent()) {
+    if (bid.is_transactional) {
+        return _tx_stm->replicate(bid, std::move(r), std::move(opts));
+    } else if (bid.has_idempotent()) {
         return _seq_stm->replicate(bid, std::move(r), std::move(opts));
     } else {
         return _raft->replicate(std::move(r), std::move(opts))
@@ -84,6 +91,10 @@ ss::future<> partition::start() {
         f = f.then([this] { return _seq_stm->start(); });
     }
 
+    if (_tx_stm) {
+        f = f.then([this] { return _tx_stm->start(); });
+    }
+
     return f;
 }
 
@@ -102,6 +113,10 @@ ss::future<> partition::stop() {
 
     if (_seq_stm) {
         f = f.then([this] { return _seq_stm->stop(); });
+    }
+
+    if (_tx_stm) {
+        f = f.then([this] { return _tx_stm->stop(); });
     }
 
     // no state machine
