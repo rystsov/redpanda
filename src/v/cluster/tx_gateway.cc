@@ -42,8 +42,8 @@ tx_gateway::prepare_tx(prepare_tx_request&& request, rpc::streaming_context&) {
 }
 
 ss::future<commit_tx_reply>
-tx_gateway::commit_tx(commit_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<commit_tx_reply>(commit_tx_reply());
+tx_gateway::commit_tx(commit_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_commit_tx(request.ntp, request.pid, request.timeout);
 }
 
 ss::future<abort_tx_reply>

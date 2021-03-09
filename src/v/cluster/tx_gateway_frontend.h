@@ -45,6 +45,7 @@ public:
     ss::future<std::optional<model::node_id>> get_tx_broker(ss::sstring);
     ss::future<abort_tx_reply> abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> prepare_tx(model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
+    ss::future<commit_tx_reply> commit_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
 
 private:
     [[maybe_unused]] ss::smp_service_group _ssg;
@@ -60,6 +61,8 @@ private:
     ss::future<abort_tx_reply> do_abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> dispatch_prepare_tx(model::node_id, model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> do_prepare_tx(model::ntp, model::term_id, model::producer_identity, model::timeout_clock::duration);
+    ss::future<commit_tx_reply> dispatch_commit_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
+    ss::future<commit_tx_reply> do_commit_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
 
     friend tx_gateway;
 };
