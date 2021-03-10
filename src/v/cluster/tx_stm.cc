@@ -374,88 +374,88 @@ tx_stm::commit_tx(model::producer_identity pid, model::tx_seq tx_seq, [[maybe_un
 ss::future<checked<raft::replicate_result, kafka::error_code>>
 tx_stm::replicate(
   model::batch_identity bid,
-  model::record_batch_reader&& br,
+  model::record_batch_reader&& b,
   [[maybe_unused]] raft::replicate_options opts) {
     
-    return sync(2'000ms).then([this, bid, br{std::move(br)}](auto is_ready) mutable {
-        if (!is_ready) {
-            return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error));
-        }
-        if (_mem_state.term != _insync_term) {
-            _mem_state = mem_state {
-                .term = _insync_term
-            };
-        }
+    auto br = std::move(b);
+    auto is_ready = co_await sync(2'000ms);
+    if (!is_ready) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
 
-        // <fencing>
-        auto fence_it = _log_state.fence_pid_epoch.find(id(bid.pid));
-        if (fence_it != _log_state.fence_pid_epoch.end()) {
-            if (epoch(bid.pid) < fence_it->second) {
-                return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error));
-            }
-        }
-        // </fencing>
+    if (_mem_state.term != _insync_term) {
+        _mem_state = mem_state {
+            .term = _insync_term
+        };
+    }
 
-        // <check> if there is there is inflight abort
-        //         or tx already is in prepared state
-        //         or if term has changes and state is stale
-        if (!_mem_state.expected.contains(bid.pid)) {
-            return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error));
+    // <fencing>
+    auto fence_it = _log_state.fence_pid_epoch.find(id(bid.pid));
+    if (fence_it != _log_state.fence_pid_epoch.end()) {
+        if (epoch(bid.pid) < fence_it->second) {
+            co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
         }
-        // </check>
-        if (_mem_state.has_prepare_applied.contains(bid.pid)) {
-            // we already trying to prepare that tx so it can't
-            // accept new produce requests, impossible situation
-            // should log
-            return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error));
-        }
-        
-        // <check> _mem_state.estimated has value when there is a follow up produce
-        //         when first hasn't finished yet, since we use overwrite 
-        //         ack=1 in-tx produce replicate should be very fast and
-        //         this is semi impossible situation
+    }
+    // </fencing>
+
+    // <check> if there is there is inflight abort
+    //         or tx already is in prepared state
+    //         or if term has changes and state is stale
+    if (!_mem_state.expected.contains(bid.pid)) {
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    // </check>
+    if (_mem_state.has_prepare_applied.contains(bid.pid)) {
+        // we already trying to prepare that tx so it can't
+        // accept new produce requests, impossible situation
+        // should log
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    
+    // <check> _mem_state.estimated has value when there is a follow up produce
+    //         when first hasn't finished yet, since we use overwrite 
+    //         ack=1 in-tx produce replicate should be very fast and
+    //         this is semi impossible situation
+    if (_mem_state.estimated.contains(bid.pid)) {
+        // unexpected situation preventing tx from
+        // preparing / comitting / replicating
+        _mem_state.expected.erase(bid.pid);
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
+    // </check>
+
+    if (!_mem_state.tx_start.contains(bid.pid)) {
+        _mem_state.estimated.emplace(bid.pid, _insync_offset);
+    }
+
+    // after continuation _mem_state may change so caching term
+    // to invalidate the post processing
+    auto term = _mem_state.term;
+
+    auto r = co_await _c->replicate(_mem_state.term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack));
+    if (!r) {
         if (_mem_state.estimated.contains(bid.pid)) {
             // unexpected situation preventing tx from
             // preparing / comitting / replicating
             _mem_state.expected.erase(bid.pid);
-            return ss::make_ready_future<checked<raft::replicate_result, kafka::error_code>>(checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error));
         }
-        // </check>
+        co_return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
+    }
 
-        if (!_mem_state.tx_start.contains(bid.pid)) {
-            _mem_state.estimated.emplace(bid.pid, _insync_offset);
-        }
+    auto replicated = r.value();
 
-        // after continuation _mem_state may change so caching term
-        // to invalidate the post processing
-        auto term = _mem_state.term;
+    if (_mem_state.term != term) {
+        co_return checked<raft::replicate_result, kafka::error_code>(replicated);
+    }
 
-        return _c->replicate(_mem_state.term, std::move(br), raft::replicate_options(raft::consistency_level::leader_ack)).then([this, term, bid](auto r) {
-            if (!r) {
-                if (_mem_state.estimated.contains(bid.pid)) {
-                    // unexpected situation preventing tx from
-                    // preparing / comitting / replicating
-                    _mem_state.expected.erase(bid.pid);
-                }
-                return checked<raft::replicate_result, kafka::error_code>(kafka::error_code::unknown_server_error);
-            }
-
-            auto b = r.value();
-
-            if (_mem_state.term != term) {
-                return checked<raft::replicate_result, kafka::error_code>(b);
-            }
-
-            auto last_offset = model::offset(b.last_offset());
-            if (!_mem_state.tx_start.contains(bid.pid)) {
-                auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
-                _mem_state.tx_start.emplace(bid.pid, base_offset);
-                _mem_state.tx_starts.insert(base_offset);
-                _mem_state.estimated.erase(bid.pid);
-            }
-            return checked<raft::replicate_result, kafka::error_code>(b);
-        });
-    });
+    auto last_offset = model::offset(replicated.last_offset());
+    if (!_mem_state.tx_start.contains(bid.pid)) {
+        auto base_offset = model::offset(last_offset() - (bid.record_count - 1));
+        _mem_state.tx_start.emplace(bid.pid, base_offset);
+        _mem_state.tx_starts.insert(base_offset);
+        _mem_state.estimated.erase(bid.pid);
+    }
+    co_return checked<raft::replicate_result, kafka::error_code>(replicated);
 }
 
 std::optional<model::offset>
