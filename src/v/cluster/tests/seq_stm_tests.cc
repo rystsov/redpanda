@@ -44,8 +44,6 @@ FIXTURE_TEST(
     wait_for_leader();
     wait_for_meta_initialized();
 
-    stm.catchup().get0();
-
     auto count = 5;
     auto rdr1 = random_batch_reader(storage::test::record_batch_spec{
       .offset = model::offset(0),
@@ -99,8 +97,6 @@ FIXTURE_TEST(
     wait_for_leader();
     wait_for_meta_initialized();
 
-    stm.catchup().get0();
-
     auto count = 5;
     auto rdr1 = random_batch_reader(storage::test::record_batch_spec{
       .offset = model::offset(0),
@@ -151,8 +147,6 @@ FIXTURE_TEST(test_seq_stm_prevents_duplicates, mux_state_machine_fixture) {
 
     wait_for_leader();
     wait_for_meta_initialized();
-
-    stm.catchup().get0();
 
     auto count = 5;
     auto rdr1 = random_batch_reader(storage::test::record_batch_spec{
@@ -207,8 +201,6 @@ FIXTURE_TEST(test_seq_stm_prevents_gaps, mux_state_machine_fixture) {
 
     wait_for_leader();
     wait_for_meta_initialized();
-
-    stm.catchup().get0();
 
     auto count = 5;
     auto rdr1 = random_batch_reader(storage::test::record_batch_spec{
@@ -277,8 +269,6 @@ FIXTURE_TEST(
       .pid = model::producer_identity{.id = 0, .epoch = 0},
       .first_seq = 1,
       .last_seq = 1 + (count - 1)};
-
-    stm.catchup().get0();
 
     auto r = stm
                .replicate(

@@ -23,20 +23,11 @@
 #include "storage/snapshot.h"
 #include "utils/expiring_promise.h"
 #include "utils/mutex.h"
+#include "cluster/persisted_stm.h"
 
 #include <absl/container/flat_hash_map.h>
 
 namespace cluster {
-
-struct seq_snapshot_header {
-    static constexpr const int8_t supported_version = 0;
-
-    int8_t version{seq_snapshot_header::supported_version};
-    int32_t snapshot_size{0};
-
-    static constexpr const size_t ondisk_size = sizeof(version)
-                                                + sizeof(snapshot_size);
-};
 
 /**
  * seq_stm is a layer in front of the log responsible for maintaining
@@ -57,21 +48,19 @@ struct seq_snapshot_header {
  * a leadership.
  */
 class seq_stm final
-  : public raft::state_machine
-  , public storage::snapshotable_stm {
+  : public persisted_stm {
 public:
     explicit seq_stm(ss::logger&, raft::consensus*, config::configuration&);
-
-    ss::future<> start() final;
-
-    ss::future<> ensure_snapshot_exists(model::offset) final;
-    ss::future<> make_snapshot() final;
-    ss::future<> catchup();
+    static constexpr const int8_t supported_version = 0;
 
     ss::future<checked<raft::replicate_result, kafka::error_code>> replicate(
       model::batch_identity,
       model::record_batch_reader&&,
       raft::replicate_options);
+
+protected:
+    void load_snapshot(stm_snapshot_header, iobuf&&) override;
+    stm_snapshot take_snapshot() override;
 
 private:
     struct seq_entry {
@@ -80,13 +69,11 @@ private:
         model::timestamp::type last_write_timestamp;
     };
 
-    struct snapshot {
+    struct seq_snapshot {
         model::offset offset;
         std::vector<seq_entry> entries;
     };
 
-    ss::future<> do_make_snapshot();
-    ss::future<> hydrate_snapshot(storage::snapshot_reader&);
     /*
      * Usually start() acts as a barrier and we don't call any methods on the
      * object before start returns control flow.
@@ -110,24 +97,10 @@ private:
      * `wait_for_snapshot_hydrated` inside those methods protects from this
      * scenario.
      */
-    ss::future<> wait_for_snapshot_hydrated();
-    ss::future<> persist_snapshot(iobuf&& data);
     void compact_snapshot();
 
-    ss::future<> catchup(model::term_id, model::offset);
-
-    model::offset _last_snapshot_offset;
     absl::flat_hash_map<model::producer_identity, seq_entry> _seq_table;
-    mutex _op_lock;
-    ss::shared_promise<> _resolved_when_snapshot_hydrated;
     model::timestamp _oldest_session;
-    bool _is_catching_up{false};
-    model::term_id _insync_term{-1};
-    model::offset _insync_offset{-1};
-    raft::consensus* _c;
-    storage::snapshot_manager _snapshot_mgr;
-    ss::logger& _log;
-    config::configuration& _config;
     ss::future<> apply(model::record_batch b) override;
 };
 
