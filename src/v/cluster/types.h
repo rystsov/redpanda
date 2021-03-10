@@ -102,6 +102,7 @@ struct init_tm_tx_reply {
 struct begin_tx_request {
     model::ntp ntp;
     model::producer_identity pid;
+    model::tx_seq tx_seq;
 };
 struct begin_tx_reply {
     model::ntp ntp;
@@ -113,6 +114,7 @@ struct prepare_tx_request {
     model::term_id etag;
     model::partition_id tm;
     model::producer_identity pid;
+    model::tx_seq tx_seq;
     model::timeout_clock::duration timeout;
 };
 struct prepare_tx_reply {
@@ -121,6 +123,7 @@ struct prepare_tx_reply {
 struct commit_tx_request {
     model::ntp ntp;
     model::producer_identity pid;
+    model::tx_seq tx_seq;
     model::timeout_clock::duration timeout;
 };
 struct commit_tx_reply {

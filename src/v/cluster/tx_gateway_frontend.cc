@@ -74,7 +74,7 @@ tx_gateway_frontend::get_tx_broker([[maybe_unused]] ss::sstring key) {
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
     
     if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
@@ -94,29 +94,30 @@ tx_gateway_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::part
     auto _self = _controller->self();
 
     if (leader == _self) {
-        return do_prepare_tx(ntp, etag, tm, pid, timeout);
+        return do_prepare_tx(ntp, etag, tm, pid, tx_seq, timeout);
     }
 
     vlog(clusterlog.trace, "dispatching prepare tx to {} from {}", leader, _self);
 
-    return dispatch_prepare_tx(leader.value(), ntp, etag, tm, pid, timeout);
+    return dispatch_prepare_tx(leader.value(), ntp, etag, tm, pid, tx_seq, timeout);
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     return _connection_cache.local()
       .with_node_client<cluster::tx_gateway_client_protocol>(
         _controller->self(),
         ss::this_shard_id(),
         leader,
         timeout,
-        [ntp, etag, tm, pid, timeout](tx_gateway_client_protocol cp) {
+        [ntp, etag, tm, pid, tx_seq, timeout](tx_gateway_client_protocol cp) {
             return cp.prepare_tx(
               prepare_tx_request{
                   .ntp = ntp,
                   .etag = etag,
                   .tm = tm,
                   .pid = pid,
+                  .tx_seq = tx_seq,
                   .timeout = timeout
                 },
               rpc::client_opts(model::timeout_clock::now() + timeout));
@@ -136,7 +137,7 @@ tx_gateway_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, 
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     auto shard = _shard_table.local().shard_for(ntp);
 
     if (shard == std::nullopt) {
@@ -147,7 +148,7 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
     }
 
     return _partition_manager.invoke_on(
-      *shard, _ssg, [ntp, etag, tm, pid, timeout](cluster::partition_manager& mgr) mutable {
+      *shard, _ssg, [ntp, etag, tm, pid, tx_seq, timeout](cluster::partition_manager& mgr) mutable {
           vlog(clusterlog.warn, "timeout {}", timeout);
           auto partition = mgr.get(ntp);
           if (!partition) {
@@ -167,7 +168,7 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
           }
 
           // ok, tx not found, timeout
-          return stm->prepare_tx(etag, tm, pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
+          return stm->prepare_tx(etag, tm, pid, tx_seq, model::timeout_clock::now() + timeout).then([](tx_errc ec){
               return prepare_tx_reply {
                   .ec = ec
               };
@@ -176,7 +177,7 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
 }
 
 ss::future<commit_tx_reply>
-tx_gateway_frontend::commit_tx(model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::commit_tx(model::ntp ntp, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
     
     if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
@@ -196,27 +197,28 @@ tx_gateway_frontend::commit_tx(model::ntp ntp, model::producer_identity pid, mod
     auto _self = _controller->self();
 
     if (leader == _self) {
-        return do_commit_tx(ntp, pid, timeout);
+        return do_commit_tx(ntp, pid, tx_seq, timeout);
     }
 
     vlog(clusterlog.trace, "dispatching commit tx to {} from {}", leader, _self);
 
-    return dispatch_commit_tx(leader.value(), ntp, pid, timeout);
+    return dispatch_commit_tx(leader.value(), ntp, pid, tx_seq, timeout);
 }
 
 ss::future<commit_tx_reply>
-tx_gateway_frontend::dispatch_commit_tx(model::node_id leader, model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::dispatch_commit_tx(model::node_id leader, model::ntp ntp, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     return _connection_cache.local()
       .with_node_client<cluster::tx_gateway_client_protocol>(
         _controller->self(),
         ss::this_shard_id(),
         leader,
         timeout,
-        [ntp, pid, timeout](tx_gateway_client_protocol cp) {
+        [ntp, pid, tx_seq, timeout](tx_gateway_client_protocol cp) {
             return cp.commit_tx(
               commit_tx_request{
                   .ntp = ntp,
                   .pid = pid,
+                  .tx_seq = tx_seq,
                   .timeout = timeout
                 },
               rpc::client_opts(model::timeout_clock::now() + timeout));
@@ -236,7 +238,7 @@ tx_gateway_frontend::dispatch_commit_tx(model::node_id leader, model::ntp ntp, m
 }
 
 ss::future<commit_tx_reply>
-tx_gateway_frontend::do_commit_tx(model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::do_commit_tx(model::ntp ntp, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     
     auto shard = _shard_table.local().shard_for(ntp);
 
@@ -248,7 +250,7 @@ tx_gateway_frontend::do_commit_tx(model::ntp ntp, model::producer_identity pid, 
     }
 
     return _partition_manager.invoke_on(
-      *shard, _ssg, [pid, ntp, timeout](cluster::partition_manager& mgr) mutable {
+      *shard, _ssg, [pid, ntp, tx_seq, timeout](cluster::partition_manager& mgr) mutable {
           vlog(clusterlog.warn, "timeout {}", timeout);
           auto partition = mgr.get(ntp);
           if (!partition) {
@@ -268,7 +270,7 @@ tx_gateway_frontend::do_commit_tx(model::ntp ntp, model::producer_identity pid, 
           }
 
           // ok, tx not found, timeout
-          return stm->commit_tx(pid, model::timeout_clock::now() + timeout).then([](tx_errc ec){
+          return stm->commit_tx(pid, tx_seq, model::timeout_clock::now() + timeout).then([](tx_errc ec){
               return commit_tx_reply {
                   .ec = ec
               };
@@ -600,7 +602,7 @@ ss::future<checked<cluster::tm_transaction, tx_errc>>
 tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::tm_transaction tx, model::timeout_clock::duration timeout, ss::lw_shared_ptr<ss::promise<tx_errc>> outcome) {
     std::vector<ss::future<prepare_tx_reply>> pfs;
     for (auto rm : tx.partitions) {
-        pfs.push_back(prepare_tx(rm.ntp, rm.etag, model::kafka_tx_ntp.tp.partition, tx.pid, timeout));
+        pfs.push_back(prepare_tx(rm.ntp, rm.etag, model::kafka_tx_ntp.tp.partition, tx.pid, tx.tx_seq, timeout));
     }
 
     if (tx.status == tm_transaction::tx_status::ongoing) {
@@ -636,7 +638,7 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
 
     std::vector<ss::future<commit_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
-        cfs.push_back(commit_tx(rm.ntp, tx.pid, timeout));
+        cfs.push_back(commit_tx(rm.ntp, tx.pid, tx.tx_seq, timeout));
     }
     auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
     ok = true;
@@ -655,10 +657,10 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
 }
 
 ss::future<checked<tm_transaction, tx_errc>>
-tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, [[maybe_unused]] model::timeout_clock::duration timeout) {
+tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, model::timeout_clock::duration timeout) {
     std::vector<ss::future<commit_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
-        cfs.push_back(commit_tx(rm.ntp, tx.pid, timeout));
+        cfs.push_back(commit_tx(rm.ntp, tx.pid, tx.tx_seq, timeout));
     }
     auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
     auto ok = true;
@@ -672,7 +674,7 @@ tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction 
 }
 
 ss::future<checked<tm_transaction, tx_errc>>
-tx_gateway_frontend::reabort_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, [[maybe_unused]] model::timeout_clock::duration timeout) {
+tx_gateway_frontend::reabort_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, model::timeout_clock::duration timeout) {
     std::vector<ss::future<abort_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
         cfs.push_back(abort_tx(rm.ntp, tx.pid, timeout));
