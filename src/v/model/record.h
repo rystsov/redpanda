@@ -18,7 +18,7 @@
 #include "model/record_utils.h"
 #include "model/timestamp.h"
 #include "vassert.h"
-
+#include <compare>
 #include <seastar/core/smp.hh>
 #include <seastar/util/optimized_optional.hh>
 
@@ -413,8 +413,7 @@ struct producer_identity {
     int64_t id{-1};
     int16_t epoch{0};
 
-    // https://en.cppreference.com/w/cpp/language/default_comparisons
-    bool operator==(const producer_identity&) const = default;
+    auto operator<=>(const producer_identity&) const = default;
 
     template<typename H>
     friend H AbslHashValue(H h, const producer_identity& pid) {
