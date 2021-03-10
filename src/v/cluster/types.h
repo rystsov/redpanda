@@ -101,6 +101,7 @@ struct init_tm_tx_reply {
 
 struct begin_tx_request {
     model::ntp ntp;
+    model::producer_identity pid;
 };
 struct begin_tx_reply {
     model::ntp ntp;

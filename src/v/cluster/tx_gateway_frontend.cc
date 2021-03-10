@@ -760,7 +760,7 @@ tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_da
                       res_partition.error_code = kafka::error_code::unknown_server_error;
                       res_topic.results.push_back(res_partition);
                   } else {
-                      bfs.push_back(begin_tx(ntp, timeout));
+                      bfs.push_back(begin_tx(ntp, pid, timeout));
                   }
               }
               response.results.push_back(res_topic);
@@ -805,7 +805,7 @@ tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_da
 }
 
 ss::future<begin_tx_reply>
-tx_gateway_frontend::begin_tx(model::ntp ntp, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::begin_tx(model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
     auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
     
     if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
@@ -827,25 +827,28 @@ tx_gateway_frontend::begin_tx(model::ntp ntp, model::timeout_clock::duration tim
     auto _self = _controller->self();
 
     if (leader == _self) {
-        return do_begin_tx(ntp);
+        return do_begin_tx(ntp, pid);
     }
 
     vlog(clusterlog.trace, "dispatching begin tx to {} from {}", leader, _self);
 
-    return dispatch_begin_tx(leader.value(), ntp, timeout);
+    return dispatch_begin_tx(leader.value(), ntp, pid, timeout);
 }
 
 ss::future<begin_tx_reply>
-tx_gateway_frontend::dispatch_begin_tx(model::node_id leader, model::ntp ntp, model::timeout_clock::duration timeout) {
+tx_gateway_frontend::dispatch_begin_tx(model::node_id leader, model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
     return _connection_cache.local()
       .with_node_client<cluster::tx_gateway_client_protocol>(
         _controller->self(),
         ss::this_shard_id(),
         leader,
         timeout,
-        [ntp, timeout](tx_gateway_client_protocol cp) {
+        [ntp, pid, timeout](tx_gateway_client_protocol cp) {
             return cp.begin_tx(
-              begin_tx_request { .ntp = ntp },
+              begin_tx_request {
+                  .ntp = ntp,
+                  .pid = pid
+              },
               rpc::client_opts(model::timeout_clock::now() + timeout));
         })
       .then(&rpc::get_ctx_data<begin_tx_reply>)
@@ -866,7 +869,7 @@ tx_gateway_frontend::dispatch_begin_tx(model::node_id leader, model::ntp ntp, mo
 }
 
 ss::future<begin_tx_reply>
-tx_gateway_frontend::do_begin_tx(model::ntp ntp) {
+tx_gateway_frontend::do_begin_tx(model::ntp ntp, model::producer_identity pid) {
     auto shard = _shard_table.local().shard_for(ntp);
 
     if (shard == std::nullopt) {
@@ -878,7 +881,7 @@ tx_gateway_frontend::do_begin_tx(model::ntp ntp) {
     }
 
     return _partition_manager.invoke_on(
-      *shard, _ssg, [ntp](cluster::partition_manager& mgr) mutable {
+      *shard, _ssg, [ntp, pid](cluster::partition_manager& mgr) mutable {
           auto partition = mgr.get(ntp);
           if (!partition) {
               vlog(clusterlog.warn, "can't get partition by {} ntp", ntp);
@@ -898,7 +901,7 @@ tx_gateway_frontend::do_begin_tx(model::ntp ntp) {
               });
           }
 
-          auto etag = stm->begin_tx();
+          auto etag = stm->begin_tx(pid);
           if (!etag) {
               return ss::make_ready_future<begin_tx_reply>(begin_tx_reply{
                   .ntp = ntp,

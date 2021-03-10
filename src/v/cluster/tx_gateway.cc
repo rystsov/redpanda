@@ -33,7 +33,7 @@ tx_gateway::init_tm_tx(init_tm_tx_request&& request, rpc::streaming_context&) {
 
 ss::future<begin_tx_reply>
 tx_gateway::begin_tx(begin_tx_request&& request, rpc::streaming_context&) {
-    return _tx_gateway_frontend.local().do_begin_tx(request.ntp);
+    return _tx_gateway_frontend.local().do_begin_tx(request.ntp, request.pid);
 }
 
 ss::future<prepare_tx_reply>
