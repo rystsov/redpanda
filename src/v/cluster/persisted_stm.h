@@ -69,7 +69,6 @@ public:
 
     ss::future<> make_snapshot() final;
     ss::future<> ensure_snapshot_exists(model::offset) final;
-    ss::future<> catchup();
     
     ss::future<> start() override;
 
@@ -81,7 +80,6 @@ protected:
     ss::future<> persist_snapshot(stm_snapshot&&);
     ss::future<> do_make_snapshot();
 
-    ss::future<> catchup(model::term_id, model::offset);
     ss::future<bool> sync(model::timeout_clock::duration);
     
     mutex _op_lock;

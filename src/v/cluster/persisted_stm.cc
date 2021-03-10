@@ -128,32 +128,6 @@ persisted_stm::ensure_snapshot_exists(model::offset target_offset) {
     });
 }
 
-ss::future<>
-persisted_stm::catchup(model::term_id last_term, model::offset last_offset) {
-    vlog(
-      _log.trace,
-      "persisted_stm is catching up with term:{} and offset:{}",
-      last_term,
-      last_offset);
-    return wait(last_offset, model::no_timeout)
-      .then([this, last_offset, last_term]() {
-          auto meta = _c->meta();
-          vlog(
-            _log.trace,
-            "persisted_stm caught up with term:{} and offset:{}; current_term: {} "
-            "current_offset: {} dirty_term: {} dirty_offset: {}",
-            last_term,
-            last_offset,
-            meta.term,
-            meta.commit_index,
-            meta.prev_log_term,
-            meta.prev_log_index);
-          if (last_term <= meta.term) {
-              _insync_term = last_term;
-          }
-      });
-}
-
 ss::future<bool> 
 persisted_stm::sync(model::timeout_clock::duration timeout) {
     if (!_c->is_leader()) {
@@ -193,19 +167,6 @@ persisted_stm::sync(model::timeout_clock::duration timeout) {
 }
 
 // 
-
-ss::future<>
-persisted_stm::catchup() {
-    if (_insync_term != _c->term()) {
-        if (!_is_catching_up) {
-            _is_catching_up = true;
-            auto meta = _c->meta();
-            return catchup(meta.prev_log_term, meta.prev_log_index)
-              .then([this]() { _is_catching_up = false; });
-        }
-    }
-    return ss::now();
-}
 
 ss::future<>
 persisted_stm::start() {
