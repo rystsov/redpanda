@@ -78,6 +78,9 @@ seq_stm::replicate(
   model::record_batch_reader&& b,
   raft::replicate_options opts) {
     if (bid.has_idempotent() && bid.first_seq <= bid.last_seq) {
+        // it's very wierd but moving the r-value from the arg
+        // to stack fixes a seg fault
+        auto br = std::move(b);
         auto is_ready = co_await sync(2'000ms);
         if (!is_ready) {
             co_return checked<raft::replicate_result, kafka::error_code>(
@@ -108,7 +111,7 @@ seq_stm::replicate(
               _oldest_session,
               model::timestamp(pid_seq->second.last_write_timestamp));
         }
-        auto r = co_await _c->replicate(_insync_term, std::move(b), opts);
+        auto r = co_await _c->replicate(_insync_term, std::move(br), opts);
         if (r) {
             co_return checked<raft::replicate_result, kafka::error_code>(
               r.value());
