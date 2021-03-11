@@ -169,6 +169,8 @@ tm_stm::re_register_producer(kafka::transactional_id tx_id, tm_etag etag, model:
     if (!is_ready) {
         co_return tm_stm::op_status::unknown;
     }
+
+    vlog(clusterlog.trace, "Avoiding mysterious pid erasure, current value: {}", pid);
     
     auto term = _insync_term;
     auto ptx = _tx_table.find(tx_id);
