@@ -50,6 +50,8 @@ struct tm_etag {
     }
 
     auto operator<=>(const tm_etag&) const = default;
+
+    friend std::ostream& operator<<(std::ostream&, const tm_etag&);
 };
 
 struct tm_transaction {
@@ -78,6 +80,8 @@ struct tm_transaction {
     model::tx_seq tx_seq;
 
     model::term_id update_term;
+
+    friend std::ostream& operator<<(std::ostream&, const tm_transaction&);
 };
 
 struct tm_snapshot {

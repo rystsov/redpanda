@@ -40,6 +40,23 @@ static auto with(ss::lw_shared_ptr<mutex> lock, Func&& func) noexcept {
     return lock->with(func);
 }
 
+std::ostream& operator<<(std::ostream& o, const tm_etag& etag) {
+    return o << "{tm_etag: log_etag=" << etag.log_etag
+             << ", mem_etag=" << etag.mem_etag
+             << "}";
+}
+
+std::ostream& operator<<(std::ostream& o, const tm_transaction& tx) {
+    return o << "{tm_transaction: id=" << tx.id
+             << ", status=" << tx.status
+             << ", pid=" << tx.pid
+             << ", size(partitions)=" << tx.partitions.size()
+             << ", etag=" << tx.etag
+             << ", tx_seq=" << tx.tx_seq
+             << ", update_term=" << tx.update_term
+             << "}";
+}
+
 tm_stm::tm_stm(
   ss::logger& logger, raft::consensus* c, config::configuration& config)
   : persisted_stm("tm", logger, c, config)
