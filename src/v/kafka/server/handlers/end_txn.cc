@@ -10,6 +10,7 @@
 #include "kafka/server/handlers/end_txn.h"
 
 #include "cluster/topics_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/logger.h"
@@ -27,8 +28,11 @@ ss::future<response_ptr> end_txn_handler::handle(request_context ctx, [[maybe_un
     return ss::do_with(std::move(ctx), [](request_context& ctx) {
         end_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-        return ss::make_exception_future<response_ptr>(std::runtime_error(
-            fmt::format("Unsupported API {}", ctx.header().key)));
+        return ctx.tx_gateway_frontend().end_txn(request.data, config::shard_local_cfg().create_topic_timeout_ms()).then([&ctx](end_txn_response_data data) {
+            end_txn_response response;
+            response.data = data;
+            return ctx.respond(std::move(response));
+        });
     });
 }
 
