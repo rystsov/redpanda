@@ -20,6 +20,7 @@
 #include "model/timeout_clock.h"
 #include "raft/types.h"
 #include "security/acl.h"
+#include "kafka/types.h"
 #include "storage/ntp_config.h"
 #include "tristate.h"
 #include "utils/to_string.h"
@@ -95,16 +96,54 @@ inline std::error_code make_error_code(tx_errc e) noexcept {
     return std::error_code(static_cast<int>(e), tx_error_category());
 }
 
-struct init_tm_tx_request { };
-struct init_tm_tx_reply { };
-struct begin_tx_request { };
-struct begin_tx_reply { };
-struct prepare_tx_request { };
-struct prepare_tx_reply { };
-struct commit_tx_request { };
-struct commit_tx_reply { };
-struct abort_tx_request { };
-struct abort_tx_reply { };
+struct init_tm_tx_request {
+    kafka::transactional_id tx_id;
+    model::timeout_clock::duration timeout;
+};
+struct init_tm_tx_reply {
+    // partition_not_exists, not_leader, topic_not_exists
+    model::producer_identity pid;
+    tx_errc ec;
+};
+
+struct begin_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+};
+struct begin_tx_reply {
+    model::ntp ntp;
+    model::term_id etag;
+    tx_errc ec;
+};
+struct prepare_tx_request {
+    model::ntp ntp;
+    model::term_id etag;
+    model::partition_id tm;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct prepare_tx_reply {
+    tx_errc ec;
+};
+struct commit_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct commit_tx_reply {
+    tx_errc ec;
+};
+struct abort_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::timeout_clock::duration timeout;
+};
+struct abort_tx_reply {
+    tx_errc ec;
+};
 struct ping_tm_request { };
 struct ping_tm_reply { };
 

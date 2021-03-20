@@ -22,6 +22,7 @@
 #include "raft/consensus_utils.h"
 #include "raft/group_configuration.h"
 #include "raft/log_eviction_stm.h"
+#include "cluster/tm_stm.h"
 #include "raft/types.h"
 #include "storage/types.h"
 
@@ -144,6 +145,18 @@ public:
     size_t size_bytes() const { return _raft->log().size_bytes(); }
     ss::future<> update_configuration(topic_properties);
 
+    ss::shared_ptr<cluster::tm_stm>& tm_stm() {
+        return _tm_stm;
+    }
+
+    model::offset true_last_stable_offset() {
+        return _rm_stm->last_stable_offset();
+    }
+
+    ss::future<std::vector<rm_stm::tx_range>> aborted_transactions(model::offset from, model::offset to) {
+        return _rm_stm->aborted_transactions(from, to);
+    }
+
 private:
     friend partition_manager;
 
@@ -154,6 +167,7 @@ private:
     ss::lw_shared_ptr<raft::log_eviction_stm> _nop_stm;
     ss::lw_shared_ptr<cluster::id_allocator_stm> _id_allocator_stm;
     ss::shared_ptr<cluster::rm_stm> _rm_stm;
+    ss::shared_ptr<cluster::tm_stm> _tm_stm;
     ss::abort_source _as;
     partition_probe _probe;
 

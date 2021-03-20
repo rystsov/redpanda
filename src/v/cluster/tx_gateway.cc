@@ -27,28 +27,28 @@ tx_gateway::tx_gateway(
   , _tx_gateway_frontend(tx_gateway_frontend) {}
 
 ss::future<init_tm_tx_reply>
-tx_gateway::init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply());
+tx_gateway::init_tm_tx(init_tm_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_init_tm_tx(request.tx_id, request.timeout);
 }
 
 ss::future<begin_tx_reply>
-tx_gateway::begin_tx(begin_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<begin_tx_reply>(begin_tx_reply());
+tx_gateway::begin_tx(begin_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_begin_tx(request.ntp, request.pid);
 }
 
 ss::future<prepare_tx_reply>
-tx_gateway::prepare_tx(prepare_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<prepare_tx_reply>(prepare_tx_reply());
+tx_gateway::prepare_tx(prepare_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_prepare_tx(request.ntp, request.etag, request.tm, request.pid, request.tx_seq, request.timeout);
 }
 
 ss::future<commit_tx_reply>
-tx_gateway::commit_tx(commit_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<commit_tx_reply>(commit_tx_reply());
+tx_gateway::commit_tx(commit_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_commit_tx(request.ntp, request.pid, request.tx_seq, request.timeout);
 }
 
 ss::future<abort_tx_reply>
-tx_gateway::abort_tx(abort_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<abort_tx_reply>(abort_tx_reply());
+tx_gateway::abort_tx(abort_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_abort_tx(request.ntp, request.pid, request.timeout);
 }
 
 ss::future<ping_tm_reply>
