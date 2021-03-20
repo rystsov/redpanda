@@ -10,6 +10,7 @@
 #include "kafka/server/handlers/add_partitions_to_txn.h"
 
 #include "cluster/topics_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/logger.h"
@@ -28,8 +29,11 @@ ss::future<response_ptr> add_partitions_to_txn_handler::handle(
      return ss::do_with(std::move(ctx), [](request_context& ctx) {
         add_partitions_to_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-        return ss::make_exception_future<response_ptr>(std::runtime_error(
-          fmt::format("Unsupported API {}", ctx.header().key)));
+        return ctx.tx_gateway_frontend().add_partition_to_tx(request.data, config::shard_local_cfg().create_topic_timeout_ms()).then([&ctx](add_partitions_to_txn_response_data data) {
+            add_partitions_to_txn_response response;
+            response.data = data;
+            return ctx.respond(std::move(response));
+        });
      });
 }
 
