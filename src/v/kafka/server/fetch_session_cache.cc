@@ -20,6 +20,7 @@ static fetch_partition make_fetch_partition(
       .max_bytes = p.partition_max_bytes,
       .fetch_offset = p.fetch_offset,
       .high_watermark = model::offset(-1),
+      .last_stable_offset = model::offset(-1),
     };
 }
 
