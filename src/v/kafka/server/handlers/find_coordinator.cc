@@ -14,6 +14,7 @@
 #include "kafka/protocol/errors.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
 #include "model/metadata.h"
+#include "cluster/tx_gateway_frontend.h"
 
 #include <seastar/util/log.hh>
 
@@ -95,8 +96,23 @@ ss::future<response_ptr> find_coordinator_handler::handle(
     find_coordinator_request request;
     request.decode(ctx.reader(), ctx.header().version);
 
+
+    if (request.data.key_type == coordinator_type::transaction) {
+        return ss::do_with(
+          std::move(ctx),
+          [request = std::move(request)](request_context& ctx) mutable {
+            return ctx.tx_gateway_frontend().get_tx_broker(request.data.key).then([&ctx](std::optional<model::node_id> tx_id){
+              if (tx_id) {
+                return handle_leader(ctx, *tx_id);
+              }
+              return ctx.respond(find_coordinator_response(error_code::coordinator_not_available));
+            });
+          });
+    }
+
     // other types include txn coordinators which are unsupported
     if (request.data.key_type != coordinator_type::group) {
+        vlog(klog.info, "find_coordinator_handler::handle type:{}", request.data.key_type);
         return ctx.respond(
           find_coordinator_response(error_code::unsupported_version));
     }
