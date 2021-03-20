@@ -21,6 +21,11 @@ static bool is_id_allocator_topic(model::ntp ntp) {
            && ntp.tp.topic == model::id_allocator_topic;
 }
 
+static bool is_tm_topic(model::ntp ntp) {
+    return ntp.ns == model::kafka_internal_namespace
+           && ntp.tp.topic == model::kafka_tx_topic;
+}
+
 partition::partition(consensus_ptr r)
   : _raft(r)
   , _probe(*this) {
@@ -28,6 +33,12 @@ partition::partition(consensus_ptr r)
     if (is_id_allocator_topic(_raft->ntp())) {
         _id_allocator_stm = ss::make_lw_shared<cluster::id_allocator_stm>(
           clusterlog, _raft.get(), config::shard_local_cfg());
+    } else if (is_tm_topic(_raft->ntp())) {
+        vassert(_raft->log_config().is_collectable(), "tm log must be collectable");
+        _nop_stm = ss::make_lw_shared<raft::log_eviction_stm>(
+            _raft.get(), clusterlog, stm_manager, _as);
+        _tm_stm = ss::make_shared<cluster::tm_stm>(clusterlog, _raft.get());
+        stm_manager->add_stm(_tm_stm);
     } else {
         if (_raft->log_config().is_collectable()) {
             _nop_stm = ss::make_lw_shared<raft::log_eviction_stm>(
@@ -87,6 +98,10 @@ ss::future<> partition::start() {
         f = f.then([this] { return _rm_stm->start(); });
     }
 
+    if (_tm_stm) {
+        f = f.then([this] { return _tm_stm->start(); });
+    }
+
     return f;
 }
 
@@ -105,6 +120,10 @@ ss::future<> partition::stop() {
 
     if (_rm_stm) {
         f = f.then([this] { return _rm_stm->stop(); });
+    }
+
+    if (_tm_stm) {
+        f = f.then([this] { return _tm_stm->stop(); });
     }
 
     // no state machine
