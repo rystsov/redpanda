@@ -277,6 +277,10 @@ STRUCT_TYPES = [
     "AddPartitionsToTxnTopic",
     "AddPartitionsToTxnTopicResult",
     "AddPartitionsToTxnPartitionResult",
+    "TxnOffsetCommitRequestTopic",
+    "TxnOffsetCommitResponseTopic",
+    "TxnOffsetCommitResponsePartition",
+    "TxnOffsetCommitRequestPartition"
 ]
 
 SCALAR_TYPES = list(basic_type_map.keys())
