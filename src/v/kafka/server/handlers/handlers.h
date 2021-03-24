@@ -39,4 +39,5 @@
 #include "kafka/server/handlers/sync_group.h"
 #include "kafka/server/handlers/add_partitions_to_txn.h"
 #include "kafka/server/handlers/add_offsets_to_txn.h"
+#include "kafka/server/handlers/txn_offset_commit.h"
 #include "kafka/server/handlers/end_txn.h"
