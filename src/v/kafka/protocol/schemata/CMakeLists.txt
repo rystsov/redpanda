@@ -52,7 +52,9 @@ set(schemata
   add_partitions_to_txn_request.json
   add_partitions_to_txn_response.json
   end_txn_request.json
-  end_txn_response.json)
+  end_txn_response.json
+  add_offsets_to_txn_request.json
+  add_offsets_to_txn_response.json)
 
 set(srcs)
 foreach(schema ${schemata})
