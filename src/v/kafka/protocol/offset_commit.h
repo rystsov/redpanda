@@ -41,6 +41,7 @@ struct offset_commit_request final {
 
     // set during request processing after mapping group to ntp
     model::ntp ntp;
+    bool is_tx {false};
 
     void encode(response_writer& writer, api_version version) {
         data.encode(writer, version);
