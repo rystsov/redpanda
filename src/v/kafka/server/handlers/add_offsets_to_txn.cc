@@ -23,14 +23,11 @@
 namespace kafka {
 
 template<>
-ss::future<response_ptr> add_offsets_to_txn_handler::handle(
-  request_context ctx, [[maybe_unused]] ss::smp_service_group g) {
-     return ss::do_with(std::move(ctx), [](request_context& ctx) {
-        add_offsets_to_txn_request request;
-        request.decode(ctx.reader(), ctx.header().version);
-        return ss::make_exception_future<response_ptr>(std::runtime_error(
-          fmt::format("Unsupported API {}", ctx.header().key)));
-     });
+ss::future<response_ptr>
+add_offsets_to_txn_handler::handle(request_context ctx, ss::smp_service_group) {
+     add_offsets_to_txn_response res;
+     res.data.error_code = error_code::none;
+     return ctx.respond(std::move(res));
 }
 
 } // namespace kafka
