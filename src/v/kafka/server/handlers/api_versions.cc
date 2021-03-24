@@ -56,6 +56,7 @@ using request_types = make_request_types<
   delete_acls_handler,
   init_producer_id_handler
   add_partitions_to_txn_handler,
+  add_offsets_to_txn_handler,
   end_txn_handler>;
 
 template<typename RequestType>
