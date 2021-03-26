@@ -49,6 +49,7 @@ static model::record_batch make_control_batch(
       raft::data_batch_type, model::offset(0));
     builder.set_producer_identity(pid.id, pid.epoch);
     builder.set_control_type();
+    builder.set_transactional_type();
     builder.add_raw_kw(
       std::move(key), std::nullopt, std::vector<model::record_header>());
 
