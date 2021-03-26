@@ -118,10 +118,11 @@ static ss::future<list_offset_partition_response> list_offsets_partition(
                   partition->start_offset()));
 
           } else if (timestamp == list_offsets_request::latest_timestamp) {
-              const auto offset = isolation_lvl
-                                      == model::isolation_level::read_committed
-                                    ? partition->last_stable_offset()
-                                    : partition->high_watermark();
+              auto offset = partition->high_watermark();
+
+              if (isolation_lvl == model::isolation_level::read_committed) {
+                  offset = partition->last_stable_offset();
+              }
 
               return ss::make_ready_future<list_offset_partition_response>(
                 list_offsets_response::make_partition(
