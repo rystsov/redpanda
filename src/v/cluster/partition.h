@@ -89,6 +89,10 @@ public:
      * kafka clients, simply report the next offset.
      */
     model::offset last_stable_offset() const {
+        if (_rm_stm) {
+            return _rm_stm->last_stable_offset();
+        }
+        
         return raft::details::next_offset(_raft->last_stable_offset());
     }
 
@@ -147,10 +151,6 @@ public:
 
     ss::shared_ptr<cluster::tm_stm>& tm_stm() {
         return _tm_stm;
-    }
-
-    model::offset true_last_stable_offset() {
-        return _rm_stm->last_stable_offset();
     }
 
     ss::future<std::vector<rm_stm::tx_range>> aborted_transactions(model::offset from, model::offset to) {

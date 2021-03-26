@@ -388,12 +388,14 @@ static ss::future<read_result> read_from_partition(
 
     reader_config.strict_max_bytes = config.strict_max_bytes;
     
-    return ss::do_with(
-      fetched_offset_range { .base_offset = model::model_limits<model::offset>::max(), .last_offset = model::offset(0) }, pw,
+    fetched_offset_range fetched_range {
+        .base_offset = model::model_limits<model::offset>::max(),
+        .last_offset = model::offset(0)
+    };
+    return ss::do_with(std::move(fetched_range), pw,
       [hw, lso, start_o, foreign_read, deadline, reader_config](fetched_offset_range& fetched_range, partition_wrapper& pw) {
           return pw.make_reader(reader_config)
-            .then([&fetched_range, hw, start_o, lso, foreign_read, deadline](model::record_batch_reader rdr) {
-                fetched_range.base_offset = fetched_range.last_offset;
+            .then([&fetched_range, start_o, hw, lso, foreign_read, deadline](model::record_batch_reader rdr) {
                 return model::transform_reader_to_memory(
                         std::move(rdr),
                         deadline.value_or(model::no_timeout),
@@ -471,10 +473,9 @@ ss::future<read_result> read_from_ntp(
                         : high_watermark;
     
     if (config::shard_local_cfg().enable_transactions.value()) {
-      vlog(klog.info, "ISOLATION {}", config.isolation_level);
       if (config.isolation_level == 1) {
-        // TODO: is it open / close interval?
-        config.max_offset = partition->true_last_stable_offset();
+        config.max_offset = partition->last_stable_offset();
+        max_offset = partition->last_stable_offset();
       }
     }
     
@@ -834,7 +835,7 @@ void op_context::create_response_placeholders() {
                 .id = fp.partition,
                 .error = error_code::none,
                 .high_watermark = fp.high_watermark,
-                .last_stable_offset = fp.high_watermark,
+                .last_stable_offset = fp.last_stable_offset,
                 .record_set = batch_reader()};
 
               response.partitions.back().responses.push_back(std::move(p));
@@ -850,8 +851,15 @@ bool update_fetch_partition(
         include = true;
     }
     if (partition.high_watermark != resp.high_watermark) {
+        include = true;
         partition.high_watermark = model::offset(resp.high_watermark);
-        return true;
+    }
+    if (partition.last_stable_offset != resp.last_stable_offset) {
+        include = true;
+        partition.last_stable_offset = model::offset(resp.last_stable_offset);
+    }
+    if (include) {
+        return include;
     }
     if (resp.error != error_code::none) {
         // Partitions with errors are always included in the response.
