@@ -559,6 +559,13 @@ tx_gateway_frontend::do_init_tm_tx(ss::shard_id shard, kafka::transactional_id t
 
 ss::future<checked<cluster::tm_transaction, tx_errc>>
 tx_gateway_frontend::abort_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::tm_transaction tx, model::timeout_clock::duration timeout, ss::lw_shared_ptr<ss::promise<tx_errc>> outcome) {
+    return stm->get_end_lock(tx.id)->with([this, &stm, timeout, tx, outcome](){
+        return do_abort_tm_tx(stm, tx, timeout, outcome);
+    });
+}
+
+ss::future<checked<cluster::tm_transaction, tx_errc>>
+tx_gateway_frontend::do_abort_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluster::tm_transaction tx, model::timeout_clock::duration timeout, ss::lw_shared_ptr<ss::promise<tx_errc>> outcome) {
     auto changed_tx = co_await stm->try_change_status(tx.id, tx.etag, cluster::tm_transaction::tx_status::aborting);
     if (!changed_tx.has_value()) {
         // todo support other error types
