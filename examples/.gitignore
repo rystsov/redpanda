@@ -1,0 +1,4 @@
+redpanda-single-node/data/
+redpanda-single-node/coredump/
+kafka-single-node/data.kafka/
+kafka-single-node/data.zookeeper/

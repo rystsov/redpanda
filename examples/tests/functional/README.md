@@ -9,7 +9,7 @@ Build redpanda:
 
 Run a redpanda instance:
 
-    cd examples/single-node
+    cd examples/redpanda-single-node
     ./prepare.sh
     ./start.sh
 
