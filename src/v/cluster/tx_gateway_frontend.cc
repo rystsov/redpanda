@@ -818,12 +818,16 @@ tx_gateway_frontend::add_partition_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add
             return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
               make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
         }
+
+        kafka::add_partitions_to_txn_response_data response;
+        if (request.topics.size()==0) {
+            return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(response);
+        }
     
         auto tx = r.value();
         
         std::vector<ss::future<begin_tx_reply>> bfs;
         
-        kafka::add_partitions_to_txn_response_data response;
         for (auto& req_topic : request.topics) {
             kafka::add_partitions_to_txn_topic_result res_topic;
             res_topic.name = req_topic.name;
