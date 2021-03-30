@@ -82,13 +82,12 @@ public class TxStream
         return offset;
     }
 
-    public void setGroupStartOffset(long start, String sink) throws Exception {
+    public void setGroupStartOffset(long start) throws Exception {
         Map<TopicPartition, OffsetAndMetadata> offsets;
 
         producer.beginTransaction();
         offsets = new HashMap<>();
         offsets.put(tp, new OffsetAndMetadata(start));
-        // producer.send(new ProducerRecord<String, String>(sink, "noop2", "noop"));
         producer.sendOffsetsToTransaction(offsets, groupId);
         producer.commitTransaction();
     }

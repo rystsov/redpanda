@@ -30,6 +30,16 @@ public class TxStreamTest extends Consts
     }
 
     @Test
+    public void testSetGroupStartOffset() throws Exception
+    {
+        TxStream stream = new TxStream(connection);
+        stream.initProducer(txId1);
+        stream.initConsumer(topic1, groupId, true);
+        stream.setGroupStartOffset(0);
+        stream.close();
+    }
+
+    @Test
     public void test() throws Exception
     {
         var producer = new SimpleProducer(connection);
@@ -53,7 +63,7 @@ public class TxStreamTest extends Consts
         }
 
         stream.initConsumer(topic1, groupId, true);
-        stream.setGroupStartOffset(first_offset, topic2);
+        stream.setGroupStartOffset(first_offset);
         var mapping = stream.process(last_offset, x -> x.toUpperCase(), 1, topic2);
         stream.close();
         
