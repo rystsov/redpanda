@@ -1053,6 +1053,12 @@ tx_gateway_frontend::end_txn(kafka::end_txn_request_data request, model::timeout
               .epoch = request.producer_epoch
           };
           if (tx.pid != pid) {
+              if (tx.pid.id == pid.id && tx.pid.epoch > pid.epoch) {
+                  return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
+                      .error_code = kafka::error_code::invalid_producer_epoch
+                  });
+              }
+
               // todo: use sane error code
               return ss::make_ready_future<kafka::end_txn_response_data>(kafka::end_txn_response_data {
                   .error_code = kafka::error_code::unknown_server_error
