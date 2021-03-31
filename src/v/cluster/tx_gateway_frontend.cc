@@ -384,28 +384,35 @@ tx_gateway_frontend::init_tm_tx(kafka::transactional_id tx_id, model::timeout_cl
       model::kafka_internal_namespace, model::kafka_tx_topic);
     
     if (!_metadata_cache.local().contains(nt, model::partition_id(0))) {
-        return ss::make_ready_future<cluster::init_tm_tx_reply>(cluster::init_tm_tx_reply {
+        co_return cluster::init_tm_tx_reply {
             .ec = tx_errc::partition_not_exists
-        });
+        };
     }
 
     auto leader = _leaders.local().get_leader(model::kafka_tx_ntp);
+
+    auto i=0;
+    while (!leader && i<30) {
+        co_await ss::sleep(0'500ms);
+        leader = _leaders.local().get_leader(model::kafka_tx_ntp);
+    }
+
     if (!leader) {
         vlog(clusterlog.warn, "can't find a leader for {}", model::kafka_tx_ntp);
-        return ss::make_ready_future<init_tm_tx_reply>(cluster::init_tm_tx_reply {
+        co_return cluster::init_tm_tx_reply {
             .ec = tx_errc::leader_not_found
-        });
+        };
     }
 
     auto _self = _controller->self();
 
     if (leader == _self) {
-        return do_init_tm_tx(tx_id, timeout);
+        co_return co_await do_init_tm_tx(tx_id, timeout);
     }
 
-    vlog(clusterlog.trace, "dispatching abort tx to {} from {}", leader, _self);
+    vlog(clusterlog.warn, "dispatching abort tx to {} from {}", leader, _self);
 
-    return dispatch_init_tm_tx(leader.value(), tx_id, timeout);
+    co_return co_await dispatch_init_tm_tx(leader.value(), tx_id, timeout);
 }
 
 ss::future<init_tm_tx_reply>

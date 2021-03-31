@@ -52,43 +52,51 @@ id_allocator_frontend::allocate_id(model::timeout_clock::duration timeout) {
     auto nt = model::topic_namespace(
       model::kafka_internal_namespace, model::id_allocator_topic);
 
-    auto has_topic = ss::make_ready_future<bool>(true);
+    auto has_topic = true;
+
 
     if (!_metadata_cache.local().contains(nt, model::partition_id(0))) {
-        has_topic = try_create_id_allocator_topic();
+        has_topic = co_await try_create_id_allocator_topic();
     }
 
-    return has_topic.then([this, timeout](bool does_topic_exist) {
-        if (!does_topic_exist) {
-            return ss::make_ready_future<allocate_id_reply>(
-              allocate_id_reply{0, errc::topic_not_exists});
+
+    if (!has_topic) {
+      vlog(clusterlog.warn,"can't meta cache entry for {}", nt);
+      co_return allocate_id_reply{0, errc::topic_not_exists};
+    }
+
+    auto leader = _leaders.local().get_leader(model::id_allocator_ntp);
+
+    if (unlikely(!leader)) {
+        auto retries
+          = config::shard_local_cfg().metadata_dissemination_retries.value();
+        auto delay_ms = config::shard_local_cfg()
+                          .metadata_dissemination_retry_delay_ms.value();
+        while (!leader && 0 < retries--) {
+            co_await ss::sleep(delay_ms);
+            leader = _leaders.local().get_leader(model::id_allocator_ntp);
         }
-
-        auto leader = _leaders.local().get_leader(model::id_allocator_ntp);
-
         if (!leader) {
             vlog(
               clusterlog.warn,
               "can't find a leader for {}",
               model::id_allocator_ntp);
-            return ss::make_ready_future<allocate_id_reply>(
-              allocate_id_reply{0, errc::no_leader_controller});
+            co_return allocate_id_reply{0, errc::no_leader_controller};
         }
+    }
+    auto _self = _controller->self();
 
-        auto _self = _controller->self();
+    if (leader == _self) {
+        co_return co_await do_allocate_id(timeout);
+    }
 
-        if (leader == _self) {
-            return do_allocate_id(timeout);
-        }
-
-        vlog(
-          clusterlog.trace,
-          "dispatching allocate id to {} from {}",
-          leader,
-          _self);
-
-        return dispatch_allocate_id_to_leader(leader.value(), timeout);
-    });
+    vlog(
+      clusterlog.trace,
+      "dispatching allocate id to {} from {}",
+      leader,
+      _self);
+    
+    co_return co_await dispatch_allocate_id_to_leader(leader.value(), timeout);
 }
 
 ss::future<allocate_id_reply>
@@ -114,7 +122,6 @@ id_allocator_frontend::dispatch_allocate_id_to_leader(
                 r.error());
               return allocate_id_reply{0, errc::timeout};
           }
-
           return r.value();
       });
 }
@@ -141,7 +148,6 @@ id_allocator_frontend::do_allocate_id(model::timeout_clock::duration timeout) {
             co_return allocate_id_reply{0, errc::no_leader_controller};
         }
     }
-
     co_return co_await do_allocate_id(*shard, timeout);
 }
 
