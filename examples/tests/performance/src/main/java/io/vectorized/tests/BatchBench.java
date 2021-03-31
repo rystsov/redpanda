@@ -73,7 +73,7 @@ public class BatchBench
             return;
         } 
         var bench = new BatchBench("127.0.0.1:9092", "topic1");
-        bench.initProducer("my-tx-1");
-        bench.measure(messages, inFlight, batchSize);
+        bench.initProducer("my-tx-1", inFlight, batchSize);
+        bench.measure(messages);
     }
 }
