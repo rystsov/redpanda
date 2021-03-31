@@ -19,71 +19,66 @@ Before running tests start a Redpanda instance and create two topics: topic1 and
     $KAFKA/bin/kafka-topics.sh --create --topic topic1 --partitions 1 --replication-factor 1 --bootstrap-server 127.0.0.1:9092
     $KAFKA/bin/kafka-topics.sh --create --topic topic2 --partitions 1 --replication-factor 1 --bootstrap-server 127.0.0.1:9092
 
-Compile bench benchmarks:
+Compile benchmarks:
 
     mvn clean dependency:copy-dependencies package
 
-Run all tests:
+### How test Kafka?
+
+See settings in `examples/kafka-single-node`. It's set to max consistency to avoid violations of transactions. See details in the ["Does Apache Kafka do ACID transactions?"](https://medium.com/@andrew_schofield/does-apache-kafka-do-acid-transactions-647b207f3d0e):
+
+> Then you factor in the way that Kafka writes to its log asynchronously and you can see that what Kafka considers to be a committed transaction is not really atomic at all.
+>
+> Under normal operation, it will all work fine, but it doesn’t take much imagination to think of a failure that can break ACID. For example, if a partition is under-replicated and the leader suffers an unexpected power outage, a little data loss could occur and this breaks the integrity of the transaction. A correlated hard failure such as a power outage that affects all brokers could even result in commit/abort markers becoming lost in all replicas. You deploy Kafka in such a way as to minimise and hopefully eliminate these kinds of problems, but there’s still an element of asynchronous durability in the mix.
+
+# Benchmarks
+
+Testing Redpanda & Kafka on a single node.
+
+## TxSendBench
+
+Test executes a transaction inserting two events to two topics X times.
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.TxSendBench
-    java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.StreamBench
+
+
+| System | 1000 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 4110 ms | 2.9 ms | 3.9 ms | 16.5 ms|
+| Kafka | 39027 ms | 32 ms | 39 ms | 79 ms |
+
+## FetchBench
+
+Test executes a transaction writing a single event to a topic and after commit reading it until it gets a written event X times.
+
+    java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.FetchBench
+
+
+| System | 1000 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 3754 ms | 2.3 ms | 3.3 ms | 18 ms|
+| Kafka | 39761 ms | 16 ms | 41 ms | 129 ms |
+
+## TxSendOffsetsBench
+
+Test executes a transation executing a single `sendOffsetsToTransaction` X times
+
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.TxSendOffsetsBench
 
-== Redpanda ========================
 
-warmed up 100 txes in     474 304 960 ns
-measured 1000 txes in   4 161 368 711 ns
-min:                        2 968 096 ns
-max:                       10 342 328 ns
-median:                     3 988 949 ns
+| System | 200 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 766 ms | 3 ms | 3.5 ms | 10 ms|
+| Kafka | 24292 ms | 22 ms | 121 ms | 132 ms |
 
-== Kafka ===========================
+## StreamBench
 
-warmed up 100 txes in   5 274 534 114 ns
-measured 1000 txes in  37 561 500 218 ns
-min:                       32 989 316 ns
-max:                       71 690 062 ns
-median:                    36 090 033 ns
+Test executes a transation reading an event from an input stream, transforming it, writing to output stream and saving an offset to a consumer group X times.
 
-=====================================================
-
-== Redpanda ========================
-
-measured 200 txes in    1 118 065 649 ns
-min:                        4 316 003 ns
-max:                       19 572 793 ns
-median:                     5 026 282 ns
-
-== Kafka ===========================
-
-measured 200 txes in   30 574 019 313 ns
-min:                       25 398 822 ns
-max:                      170 911 605 ns
-median:                   152 368 649 ns
-
-=====================================================
-
-measured 200 txes in      766 967 712 ns
-min:                        3 029 808 ns
-max:                        6 113 190 ns
-median:                     3 570 479 ns
-
-measured 200 txes in   24 292 613 748 ns
-min:                       30 096 059 ns
-max:                      132 180 312 ns
-median:                   121 679 592 ns
+    java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.StreamBench
 
 
-
-
-insert 200000 records in a single tx in 1945968649ns
-insert 200000 records in a single tx in 2726462497ns
-insert 200000 records in a single tx in 7273449811ns
-
-insert 200000 records in a single tx in 18670650098ns
-
-insert 200000 records in a single tx in 17353401322ns
-insert 200000 records in a single tx in   631768764ns
-
-insert 200000 records in a single tx in  336680326ns
-
+| System | 200 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 1118 ms | 4.3 ms | 5 ms | 15 ms|
+| Kafka | 30574 ms | 23 ms | 150 ms | 163 ms |
