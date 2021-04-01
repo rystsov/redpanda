@@ -19,6 +19,7 @@
 #include "kafka/protocol/leave_group.h"
 #include "kafka/protocol/list_groups.h"
 #include "kafka/protocol/offset_commit.h"
+#include "kafka/protocol/txn_offset_commit.h"
 #include "kafka/protocol/offset_fetch.h"
 #include "kafka/protocol/sync_group.h"
 #include "kafka/server/group.h"
@@ -134,6 +135,9 @@ public:
     /// \brief Handle a OffsetCommit request
     ss::future<offset_commit_response>
     offset_commit(offset_commit_request&& request);
+
+    ss::future<txn_offset_commit_response>
+    txn_offset_commit(txn_offset_commit_request&& request);
 
     /// \brief Handle a OffsetFetch request
     ss::future<offset_fetch_response>
