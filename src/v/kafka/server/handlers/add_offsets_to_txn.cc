@@ -30,17 +30,12 @@ add_offsets_to_txn_handler::handle(request_context ctx, ss::smp_service_group) {
      return ss::do_with(std::move(ctx), [](request_context& ctx) {
         add_offsets_to_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-        
-        add_partitions_to_txn_request fake;
-        fake.data.transactional_id = request.data.transactional_id;
-        fake.data.producer_id = request.data.producer_id;
-        fake.data.producer_epoch = request.data.producer_epoch;
 
-        auto f = ctx.tx_gateway_frontend().add_partition_to_tx(fake.data, config::shard_local_cfg().create_topic_timeout_ms());
+        auto f = ctx.tx_gateway_frontend().add_offsets_to_tx(request.data, config::shard_local_cfg().create_topic_timeout_ms());
 
-        return f.then([&ctx]([[maybe_unused]] add_partitions_to_txn_response_data data) {
+        return f.then([&ctx](add_offsets_to_txn_response_data data) {
             add_offsets_to_txn_response res;
-            res.data.error_code = error_code::none;
+            res.data = data;
             return ctx.respond(std::move(res));
         });
      });

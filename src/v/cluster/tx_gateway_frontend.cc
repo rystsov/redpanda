@@ -720,6 +720,55 @@ make_add_partitions_error_response(kafka::add_partitions_to_txn_request_data req
     return response;
 }
 
+ss::future<checked<tm_transaction, tx_errc>>
+tx_gateway_frontend::get_tx(ss::shared_ptr<tm_stm>& stm, model::producer_identity pid, kafka::transactional_id transactional_id, model::timeout_clock::duration timeout) {
+    auto maybe_tx = stm->get_tx(transactional_id);
+    if (!maybe_tx) {
+        // todo: use sane error code
+        return ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx_errc::timeout);
+    }
+
+
+    auto tx = maybe_tx.value();
+
+    if (tx.pid != pid) {
+        // todo: use sane error code
+        return ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx_errc::timeout);
+    }
+    
+    if (tx.status == tm_transaction::tx_status::aborting) {
+        return ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx_errc::timeout);
+    }
+
+    auto f = ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx);
+
+    if (tx.status != tm_transaction::tx_status::ongoing) {
+        if (tx.status == tm_transaction::tx_status::preparing) {
+            f = commit_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
+        } else if (tx.status == tm_transaction::tx_status::prepared) {
+            f = recommit_tm_tx(stm, tx, timeout);
+        } else {
+            vassert(tx.status == tm_transaction::tx_status::finished, "unexpected tx status {}", tx.status);
+        }
+    
+        f = f.then([&stm](checked<tm_transaction, tx_errc> r) {
+            if (!r.has_value()) {
+                return r;
+            }
+            
+            auto tx = r.value();
+            
+            auto changed_tx = stm->mark_tx_ongoing(tx.id, tx.etag);
+            if (!changed_tx.has_value()) {
+                return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
+            }
+            return checked<cluster::tm_transaction, tx_errc>(changed_tx.value());
+        });
+    }
+
+    return f;
+}
+
 ss::future<kafka::add_partitions_to_txn_response_data>
 tx_gateway_frontend::add_partition_to_tx(kafka::add_partitions_to_txn_request_data request, model::timeout_clock::duration timeout) {
     auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
@@ -771,54 +820,7 @@ tx_gateway_frontend::add_partition_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add
         .epoch = request.producer_epoch
     };
 
-    auto maybe_tx = stm->get_tx(request.transactional_id);
-    if (!maybe_tx) {
-        // todo: use sane error code
-        return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
-            make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
-    }
-
-
-    auto tx = maybe_tx.value();
-
-    if (tx.pid != pid) {
-        // todo: use sane error code
-        return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
-            make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
-    }
-    
-    if (tx.status == tm_transaction::tx_status::aborting) {
-        return ss::make_ready_future<kafka::add_partitions_to_txn_response_data>(
-        make_add_partitions_error_response(request, kafka::error_code::unknown_server_error));
-    }
-
-    auto f = ss::make_ready_future<checked<tm_transaction, tx_errc>>(tx);
-
-    if (tx.status != tm_transaction::tx_status::ongoing) {
-        
-    
-        if (tx.status == tm_transaction::tx_status::preparing) {
-            f = commit_tm_tx(stm, tx, timeout, ss::make_lw_shared<ss::promise<tx_errc>>());
-        } else if (tx.status == tm_transaction::tx_status::prepared) {
-            f = recommit_tm_tx(stm, tx, timeout);
-        } else {
-            vassert(tx.status == tm_transaction::tx_status::finished, "unexpected tx status {}", tx.status);
-        }
-    
-        f = f.then([&stm](checked<tm_transaction, tx_errc> r) {
-            if (!r.has_value()) {
-                return r;
-            }
-            
-            auto tx = r.value();
-            
-            auto changed_tx = stm->mark_tx_ongoing(tx.id, tx.etag);
-            if (!changed_tx.has_value()) {
-                return checked<cluster::tm_transaction, tx_errc>(tx_errc::timeout);
-            }
-            return checked<cluster::tm_transaction, tx_errc>(changed_tx.value());
-        });
-    }
+    auto f = get_tx(stm, pid, request.transactional_id, timeout);
 
     return f.then([this, pid, request, timeout, &stm](checked<tm_transaction, tx_errc> r){
         if (!r.has_value()) {
@@ -894,6 +896,87 @@ tx_gateway_frontend::add_partition_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add
             }
             return response;
         });
+    });
+}
+
+ss::future<kafka::add_offsets_to_txn_response_data>
+tx_gateway_frontend::add_offsets_to_tx(kafka::add_offsets_to_txn_request_data request, model::timeout_clock::duration timeout) {
+    auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", model::kafka_tx_ntp);
+        // todo: use sane error code
+        return ss::make_ready_future<kafka::add_offsets_to_txn_response_data>(kafka::add_offsets_to_txn_response_data {
+            .error_code = kafka::error_code::unknown_server_error
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [this, request, timeout](cluster::partition_manager& mgr) mutable {
+          auto partition = mgr.get(model::kafka_tx_ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", model::kafka_tx_ntp);
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::add_offsets_to_txn_response_data>(kafka::add_offsets_to_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          auto stm = partition->tm_stm();
+          
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tm stm of the {}' partition", model::kafka_tx_ntp);
+              return ss::make_ready_future<kafka::add_offsets_to_txn_response_data>(kafka::add_offsets_to_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          auto maybe_tx = stm->get_tx(request.transactional_id);
+          if (!maybe_tx) {
+              // todo: use sane error code
+              return ss::make_ready_future<kafka::add_offsets_to_txn_response_data>(kafka::add_offsets_to_txn_response_data {
+                  .error_code = kafka::error_code::unknown_server_error
+              });
+          }
+
+          return ss::do_with(stm, [this, request, timeout](auto& stm) {
+              return stm->get_end_lock(request.transactional_id)->with([this, &stm, request, timeout](){
+                  return add_offsets_to_tx(stm, request, timeout);
+              });
+          });
+      });
+}
+
+ss::future<kafka::add_offsets_to_txn_response_data>
+tx_gateway_frontend::add_offsets_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add_offsets_to_txn_request_data request, model::timeout_clock::duration timeout) {
+    model::producer_identity pid {
+        .id = request.producer_id,
+        .epoch = request.producer_epoch
+    };
+
+    auto f = get_tx(stm, pid, request.transactional_id, timeout);
+
+    // this, pid, request, timeout, &stm
+    return f.then([&stm, request](checked<tm_transaction, tx_errc> r){
+        if (!r.has_value()) {
+            return kafka::add_offsets_to_txn_response_data {
+                .error_code = kafka::error_code::unknown_server_error
+            };
+        }
+
+        auto tx = r.value();
+        // kafka::group_id group_id
+        auto has_added = stm->add_group(tx.id, tx.etag, request.group_id);
+
+        if (!has_added) {
+            return kafka::add_offsets_to_txn_response_data {
+                .error_code = kafka::error_code::unknown_server_error
+            };
+        }
+
+        return kafka::add_offsets_to_txn_response_data {
+            .error_code = kafka::error_code::none
+        };
     });
 }
 

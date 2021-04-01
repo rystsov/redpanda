@@ -79,6 +79,7 @@ struct tm_transaction {
     model::tx_seq tx_seq;
     tx_status status;
     std::vector<tx_partition> partitions;
+    std::vector<kafka::group_id> groups;
     // version of tm_tx, used to perform conditional updates
     tm_etag etag;
 
@@ -124,6 +125,7 @@ public:
       kafka::transactional_id,
       tm_etag,
       std::vector<tm_transaction::tx_partition>);
+    bool add_group(kafka::transactional_id, tm_etag, kafka::group_id);
 
     // redpanda acks a transaction after a decision to commit / abort
     // is persisted but before tx is executed; without a coordination
