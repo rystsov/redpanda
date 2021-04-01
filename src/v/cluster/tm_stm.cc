@@ -279,6 +279,22 @@ bool tm_stm::add_partitions(
     return true;
 }
 
+bool tm_stm::add_group(
+  kafka::transactional_id tx_id,
+  tm_etag etag,
+  kafka::group_id group_id) {
+    auto ptx = _tx_table.find(tx_id);
+    if (ptx == _tx_table.end()) {
+        return false;
+    }
+    if (ptx->second.etag != etag) {
+        return false;
+    }
+    ptx->second.etag = etag.inc_mem();
+    ptx->second.groups.push_back(group_id);
+    return true;
+}
+
 void tm_stm::expire_old_txs() {
     // TODO: expiration of old transactions
 }

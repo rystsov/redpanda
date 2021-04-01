@@ -22,6 +22,7 @@
 #include "seastarx.h"
 #include "cluster/tx_gateway.h"
 #include "kafka/protocol/add_partitions_to_txn.h"
+#include "kafka/protocol/add_offsets_to_txn.h"
 #include "kafka/protocol/end_txn.h"
 #include "cluster/tm_stm.h"
 
@@ -52,6 +53,7 @@ public:
     ss::future<commit_tx_reply> commit_tx(model::ntp, model::producer_identity, model::tx_seq, model::timeout_clock::duration);
     ss::future<init_tm_tx_reply> init_tm_tx(kafka::transactional_id, model::timeout_clock::duration);
     ss::future<kafka::add_partitions_to_txn_response_data> add_partition_to_tx(kafka::add_partitions_to_txn_request_data, model::timeout_clock::duration);
+    ss::future<kafka::add_offsets_to_txn_response_data> add_offsets_to_tx(kafka::add_offsets_to_txn_request_data, model::timeout_clock::duration);
     ss::future<begin_tx_reply> begin_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<kafka::end_txn_response_data> end_txn(kafka::end_txn_request_data, model::timeout_clock::duration);
 
@@ -66,6 +68,9 @@ private:
     [[maybe_unused]] ss::sharded<cluster::id_allocator_frontend>& _id_allocator_frontend;
 
     ss::future<bool> try_create_tx_topic();
+
+    [[maybe_unused]] ss::future<checked<tm_transaction, tx_errc>> get_tx(ss::shared_ptr<tm_stm>&, model::producer_identity, kafka::transactional_id, model::timeout_clock::duration);
+
     ss::future<abort_tx_reply> dispatch_abort_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<abort_tx_reply> do_abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> dispatch_prepare_tx(model::node_id, model::ntp, model::term_id, model::partition_id, model::producer_identity, model::tx_seq, model::timeout_clock::duration);
@@ -86,7 +91,7 @@ private:
     ss::future<begin_tx_reply> dispatch_begin_tx(model::node_id, model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<begin_tx_reply> do_begin_tx(model::ntp, model::producer_identity);
     ss::future<kafka::add_partitions_to_txn_response_data> add_partition_to_tx(ss::shared_ptr<tm_stm>&, kafka::add_partitions_to_txn_request_data, model::timeout_clock::duration);
-
+    ss::future<kafka::add_offsets_to_txn_response_data> add_offsets_to_tx(ss::shared_ptr<tm_stm>&, kafka::add_offsets_to_txn_request_data, model::timeout_clock::duration);
     friend tx_gateway;
 };
 } // namespace cluster
