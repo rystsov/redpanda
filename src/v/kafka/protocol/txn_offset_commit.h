@@ -40,6 +40,9 @@ struct txn_offset_commit_request final {
 
     txn_offset_commit_request_data data;
 
+    // set during request processing after mapping group to ntp
+    model::ntp ntp;
+
     void encode(response_writer& writer, api_version version) {
         data.encode(writer, version);
     }
@@ -58,6 +61,22 @@ struct txn_offset_commit_response final {
     using api_type = txn_offset_commit_api;
 
     txn_offset_commit_response_data data;
+
+    txn_offset_commit_response() = default;
+
+    txn_offset_commit_response(
+      const txn_offset_commit_request& request, error_code error) {
+        for (const auto& t : request.data.topics) {
+            txn_offset_commit_response_topic tmp{.name = t.name};
+            for (const auto& p : t.partitions) {
+                tmp.partitions.push_back({
+                  .partition_index = p.partition_index,
+                  .error_code = error,
+                });
+            }
+            data.topics.push_back(std::move(tmp));
+        }
+    }
 
     void encode(const request_context& ctx, response& resp) {
         data.encode(resp.writer(), ctx.header().version);

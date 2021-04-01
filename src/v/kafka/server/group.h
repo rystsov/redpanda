@@ -394,8 +394,13 @@ public:
     void fail_offset_commit(
       const model::topic_partition& tp, const offset_metadata& md);
 
+    ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
+    
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
 
+    ss::future<txn_offset_commit_response>
+    handle_txn_offset_commit(txn_offset_commit_request&& r);
+    
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);
 

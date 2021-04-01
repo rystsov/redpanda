@@ -1174,6 +1174,12 @@ void group::fail_offset_commit(
     }
 }
 
+ss::future<txn_offset_commit_response>
+group::store_txn_offsets([[maybe_unused]] txn_offset_commit_request&& r) {
+    txn_offset_commit_response res;
+    co_return res;
+}
+
 ss::future<offset_commit_response>
 group::store_offsets(offset_commit_request&& r) {
     cluster::simple_batch_builder builder(
@@ -1240,6 +1246,23 @@ group::store_offsets(offset_commit_request&& r) {
 
           return offset_commit_response(req, error);
       });
+}
+
+ss::future<txn_offset_commit_response>
+group::handle_txn_offset_commit(txn_offset_commit_request&& r) {
+    if (in_state(group_state::dead)) {
+        co_return txn_offset_commit_response(r, error_code::coordinator_not_available);
+    } else if (in_state(group_state::empty)) {
+        // <kafka>The group is only using Kafka to store offsets.</kafka>
+        co_return co_await store_txn_offsets(std::move(r));
+    } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        co_return co_await store_txn_offsets(std::move(r));
+    } else if (in_state(group_state::completing_rebalance)) {
+        co_return txn_offset_commit_response(r, error_code::rebalance_in_progress);
+    } else {
+        vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
+        co_return txn_offset_commit_response(r, error_code::unknown_server_error);
+    }
 }
 
 ss::future<offset_commit_response>
