@@ -140,6 +140,7 @@ tm_stm::mark_tx_finished(kafka::transactional_id tx_id, tm_etag etag) {
     ptx->second.status = tm_transaction::tx_status::finished;
     ptx->second.etag = etag.inc_mem();
     ptx->second.partitions.clear();
+    ptx->second.groups.clear();
     return ptx->second;
 }
 
@@ -156,6 +157,7 @@ tm_stm::mark_tx_ongoing(kafka::transactional_id tx_id, tm_etag etag) {
     ptx->second.etag = etag.inc_mem();
     ptx->second.tx_seq += 1;
     ptx->second.partitions.clear();
+    ptx->second.groups.clear();
     return ptx->second;
 }
 

@@ -595,7 +595,9 @@ void application::wire_up_redpanda_services() {
       std::ref(_raft_connection_cache),
       std::ref(controller->get_partition_leaders()),
       std::ref(controller),
-      std::ref(id_allocator_frontend))
+      std::ref(id_allocator_frontend),
+      std::ref(coordinator_ntp_mapper),
+      std::ref(group_router))
       .get();
 
     rpc::server_configuration kafka_cfg("kafka_rpc");

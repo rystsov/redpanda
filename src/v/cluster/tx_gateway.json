@@ -31,9 +31,9 @@
             "output_type": "abort_tx_reply"
         },
         {
-            "name": "ping_tm",
-            "input_type": "ping_tm_request",
-            "output_type": "ping_tm_reply"
+            "name": "commit_group_tx",
+            "input_type": "commit_group_tx_request",
+            "output_type": "commit_group_tx_reply"
         }
     ]
 }

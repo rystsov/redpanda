@@ -12,6 +12,7 @@
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
 #include "cluster/id_allocator_frontend.h"
+#include "kafka/server/coordinator_ntp_mapper.h"
 #include <seastar/core/coroutine.hh>
 #include <algorithm>
 
@@ -29,7 +30,9 @@ tx_gateway_frontend::tx_gateway_frontend(
     ss::sharded<rpc::connection_cache>& connection_cache,
     ss::sharded<partition_leaders_table>& leaders,
     std::unique_ptr<cluster::controller>& controller,
-    ss::sharded<cluster::id_allocator_frontend>& id_allocator_frontend)
+    ss::sharded<cluster::id_allocator_frontend>& id_allocator_frontend,
+    ss::sharded<kafka::coordinator_ntp_mapper>& coordinator_mapper,
+    ss::sharded<kafka::group_router>& group_router)
     : _ssg(ssg)
     , _partition_manager(partition_manager)
     , _shard_table(shard_table)
@@ -37,7 +40,9 @@ tx_gateway_frontend::tx_gateway_frontend(
     , _connection_cache(connection_cache)
     , _leaders(leaders)
     , _controller(controller)
-    , _id_allocator_frontend(id_allocator_frontend) {}
+    , _id_allocator_frontend(id_allocator_frontend)
+    , _coordinator_mapper(coordinator_mapper)
+    , _group_router(group_router) {}
 
 ss::future<std::optional<model::node_id>>
 tx_gateway_frontend::get_tx_broker([[maybe_unused]] ss::sstring key) {
@@ -173,6 +178,81 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
               };
           });
       });
+}
+
+ss::future<commit_group_tx_reply>
+tx_gateway_frontend::commit_group_tx(kafka::group_id group_id, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
+    if (!ntp_opt) {
+        co_return commit_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+
+    auto ntp = ntp_opt.value();
+
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        co_return commit_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+
+    auto leader = _leaders.local().get_leader(ntp);
+    if (!leader) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        co_return commit_group_tx_reply {
+            .ec = tx_errc::leader_not_found
+        };
+    }
+
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        co_return co_await do_commit_group_tx(group_id, pid, tx_seq, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching commit group tx to {} from {}", leader, _self);
+
+    co_return co_await dispatch_commit_group_tx(leader.value(), group_id, pid, tx_seq, timeout);
+}
+
+ss::future<commit_group_tx_reply>
+tx_gateway_frontend::dispatch_commit_group_tx(model::node_id leader, kafka::group_id group_id, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::tx_seq tx_seq, [[maybe_unused]] model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [group_id, pid, tx_seq, timeout](tx_gateway_client_protocol cp) {
+            return cp.commit_group_tx(
+              commit_group_tx_request{
+                  .pid = pid,
+                  .tx_seq = tx_seq,
+                  .group_id = group_id,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<commit_group_tx_reply>)
+      .then([](result<commit_group_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote abort tx",
+                r.error());
+              return commit_group_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<commit_group_tx_reply>
+tx_gateway_frontend::do_commit_group_tx([[maybe_unused]] kafka::group_id group_id, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::tx_seq tx_seq, [[maybe_unused]] model::timeout_clock::duration timeout) {
+    vlog(clusterlog.warn, "SHAI do_commit_group_tx {}", group_id);
+    co_return commit_group_tx_reply();
 }
 
 ss::future<commit_tx_reply>
@@ -649,12 +729,20 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
     }
     tx = changed_tx.value();
 
+    std::vector<ss::future<commit_group_tx_reply>> gfs;
+    for (auto group_id : tx.groups) {
+        gfs.push_back(commit_group_tx(group_id, tx.pid, tx.tx_seq, timeout));
+    }
     std::vector<ss::future<commit_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
         cfs.push_back(commit_tx(rm.ntp, tx.pid, tx.tx_seq, timeout));
     }
-    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
     ok = true;
+    auto grs = co_await when_all_succeed(gfs.begin(), gfs.end());
+    for (auto r : grs) {
+        ok = ok && (r.ec == tx_errc::none);
+    }
+    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
     for (auto r : crs) {
         ok = ok && (r.ec == tx_errc::none);
     }
@@ -671,15 +759,25 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
 
 ss::future<checked<tm_transaction, tx_errc>>
 tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, model::timeout_clock::duration timeout) {
+    std::vector<ss::future<commit_group_tx_reply>> gfs;
+    for (auto group_id : tx.groups) {
+        gfs.push_back(commit_group_tx(group_id, tx.pid, tx.tx_seq, timeout));
+    }
     std::vector<ss::future<commit_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
         cfs.push_back(commit_tx(rm.ntp, tx.pid, tx.tx_seq, timeout));
     }
-    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
+
     auto ok = true;
+    auto grs = co_await when_all_succeed(gfs.begin(), gfs.end());
+    for (auto r : grs) {
+        ok = ok && (r.ec == tx_errc::none);
+    }
+    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
     for (auto r : crs) {
         ok = ok && (r.ec == tx_errc::none);
     }
+
     if (ok) {
         co_return checked<tm_transaction, tx_errc>(tx);
     }
