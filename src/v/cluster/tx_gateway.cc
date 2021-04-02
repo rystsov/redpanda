@@ -51,9 +51,9 @@ tx_gateway::abort_tx(abort_tx_request&& request, rpc::streaming_context&) {
     return _tx_gateway_frontend.local().do_abort_tx(request.ntp, request.pid, request.timeout);
 }
 
-ss::future<ping_tm_reply>
-tx_gateway::ping_tm(ping_tm_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<ping_tm_reply>(ping_tm_reply());
-}
+ss::future<commit_group_tx_reply>
+tx_gateway::commit_group_tx(commit_group_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_commit_group_tx(request.group_id, request.pid, request.tx_seq, request.timeout);
+};
 
 } // namespace cluster

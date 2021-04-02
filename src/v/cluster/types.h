@@ -144,8 +144,15 @@ struct abort_tx_request {
 struct abort_tx_reply {
     tx_errc ec;
 };
-struct ping_tm_request { };
-struct ping_tm_reply { };
+struct commit_group_tx_request {
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    kafka::group_id group_id;
+    model::timeout_clock::duration timeout;
+};
+struct commit_group_tx_reply {
+    tx_errc ec;
+};
 
 /// Join request sent by node to join raft-0
 struct join_request {
