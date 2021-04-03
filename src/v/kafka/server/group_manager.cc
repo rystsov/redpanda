@@ -235,7 +235,7 @@ ss::future<> group_manager::handle_partition_leader_change(
               0,
               std::numeric_limits<size_t>::max(),
               kafka_read_priority(),
-              raft::data_batch_type,
+              std::nullopt,
               std::nullopt,
               std::nullopt);
 
@@ -316,8 +316,6 @@ ss::future<> group_manager::recover_partition(
               });
         }
 
-        // todo: insert_tx_offset
-
         _groups.emplace(e.first, group);
         group->reschedule_all_member_heartbeats();
     }
@@ -342,10 +340,17 @@ ss::future<> group_manager::recover_partition(
               });
         }
 
-        // todo: insert_tx_offset
-
         _groups.emplace(e.first, group);
         group->reschedule_all_member_heartbeats();
+    }
+
+    for (const auto& [_, tx] : ctx.ongoing_txs) {
+        auto group = get_group(tx.group_id);
+        if (!group) {
+            klog.warn("can't find group {}", tx.group_id);
+            continue;
+        }
+        group->insert_ongoing(tx);
     }
 
     _groups.rehash(0);
@@ -407,7 +412,7 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
             .group_id = val.group_id
         };
   
-        auto [ongoing_it, inserted] = ongoing_txs.try_emplace(tx.pid.id, tx);
+        auto [ongoing_it, inserted] = st.ongoing_txs.try_emplace(tx.pid.id, tx);
         if (!inserted && ongoing_it->second.pid.epoch > tx.pid.epoch) {
             klog.warn("a logged tx {} is fenced off by prev logged tx {}", val.pid, ongoing_it->second.pid);
             return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
@@ -426,6 +431,52 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
             // TODO: support leader_epoch
             ongoing_it->second.offsets[update.tp] = md;
         }
+
+        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+    } else if (batch.header().type == cluster::group_commit_tx_batch_type) {
+        vassert(batch.record_count() == 1, "prepare batch must contain a single record");
+        auto r = batch.copy_records();
+        auto& record = *r.begin();
+        auto key_buf = record.release_key();
+        kafka::request_reader buf_reader(std::move(key_buf));
+        auto version = model::control_record_version(buf_reader.read_int16());
+
+        const auto& hdr = batch.header();
+        auto bid = model::batch_identity::from(hdr);
+
+        vassert(
+          version == group::commit_tx_record_version,
+          "unknown group inflight tx record version: {} expected: {}",
+          version,
+          group::commit_tx_record_version);
+        
+        auto ongoing_it = st.ongoing_txs.find(bid.pid.id);
+        if (ongoing_it == st.ongoing_txs.end()) {
+            klog.warn("can't find ongoing tx {}", bid.pid);
+            return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+        } else if (ongoing_it->second.pid.epoch != bid.pid.epoch) {
+            klog.warn("a comitting tx {} doesn't match ongoing tx {}", bid.pid, ongoing_it->second.pid);
+            return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+        }
+
+        for (const auto& [tp, md] : ongoing_it->second.offsets) {
+            group_log_offset_key key{
+              ongoing_it->second.group_id,
+              tp.topic,
+              tp.partition,
+            };
+            
+            group_log_offset_metadata val{
+              .offset = md.offset,
+              .leader_epoch = 0, // we never use leader_epoch down the stack
+              .metadata = md.metadata
+            };
+
+            // todo: check log_offset to avoid overwrite
+            st.loaded_offsets[key] = std::make_pair(md.log_offset, std::move(val));
+        }
+
+        st.ongoing_txs.erase(ongoing_it);
 
         return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
     } else {
@@ -486,6 +537,7 @@ ss::future<> recovery_batch_consumer::handle_offset_metadata(
     auto key = reflection::from_iobuf<group_log_offset_key>(std::move(key_buf));
 
     if (!val_buf) {
+        // TODO: it looks like a bug, see group::store_offsets, it always set value
         // tombstone
         st.loaded_offsets.erase(key);
     } else {

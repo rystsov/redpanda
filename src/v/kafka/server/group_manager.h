@@ -309,6 +309,8 @@ struct recovery_batch_consumer_state {
       group_log_offset_key,
       std::pair<model::offset, group_log_offset_metadata>>
       loaded_offsets;
+    
+    absl::node_hash_map<int64_t, group::group_ongoing_tx> ongoing_txs;
 };
 
 struct recovery_batch_consumer {
@@ -324,7 +326,6 @@ struct recovery_batch_consumer {
     recovery_batch_consumer_state end_of_stream() { return std::move(st); }
 
     recovery_batch_consumer_state st;
-    absl::node_hash_map<int64_t, group::group_ongoing_tx> ongoing_txs;
     model::offset batch_base_offset;
 
     ss::abort_source& as;

@@ -133,6 +133,7 @@ public:
     using duration_type = clock_type::duration;
 
     static constexpr model::control_record_version inflight_tx_record_version{0};
+    static constexpr model::control_record_version commit_tx_record_version{0};
 
     struct offset_metadata {
         model::offset log_offset;
@@ -453,6 +454,8 @@ public:
     void insert_offset(model::topic_partition tp, offset_metadata md) {
         _offsets[std::move(tp)] = std::move(md);
     }
+
+    void insert_ongoing(group_ongoing_tx);
 
     // helper for the kafka api: describe groups
     described_group describe() const;

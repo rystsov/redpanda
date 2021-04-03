@@ -1078,7 +1078,6 @@ tx_gateway_frontend::add_offsets_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add_o
         }
 
         auto tx = r.value();
-        // kafka::group_id group_id
         auto has_added = stm->add_group(tx.id, tx.etag, request.group_id);
 
         if (!has_added) {
