@@ -1174,19 +1174,89 @@ void group::fail_offset_commit(
     }
 }
 
+ss::future<mark_group_committed_result>
+group::mark_committed([[maybe_unused]] mark_group_committed_request&& r) {
+    vlog(klog.info, "SHAI do_commit_group_tx {}", r.data.group_id);
+    // look ongoing & commit it
+    co_return mark_group_committed_result();
+}
+
 ss::future<txn_offset_commit_response>
-group::store_txn_offsets([[maybe_unused]] txn_offset_commit_request&& r) {
+group::store_txn_offsets(txn_offset_commit_request&& r) {
+    model::producer_identity pid {
+        .id = r.data.producer_id,
+        .epoch = r.data.producer_epoch
+    };
+
+    auto tx = group_ongoing_tx {
+        .pid = pid,
+        .group_id = r.data.group_id
+    };
+
+    auto [ongoing_it, inserted] = _ongoing_txs.try_emplace(pid.id, tx);
+    if (!inserted && ongoing_it->second.pid.epoch > pid.epoch) {
+        co_return txn_offset_commit_response(r, error_code::invalid_producer_epoch);
+    } else if (!inserted && ongoing_it->second.pid.epoch < pid.epoch) {
+        ongoing_it->second.pid = pid;
+        ongoing_it->second.offsets.clear();
+    }
+
+    auto tx_entry = group_log_inflight_tx {
+        .group_id = r.data.group_id,
+        .pid = pid
+    };
+
+    for (const auto& t : r.data.topics) {
+        for (const auto& p : t.partitions) {
+            group_log_inflight_tx_tp_update tx_update;
+            
+            model::topic_partition tp(t.name, p.partition_index);
+            tx_update.tp = tp;
+            tx_update.offset = p.committed_offset;
+            tx_update.leader_epoch = p.committed_leader_epoch;
+            tx_update.metadata = p.committed_metadata.value_or("");
+            tx_entry.updates.push_back(tx_update);
+        }
+    }
+
+    iobuf key;
+    kafka::response_writer w(key);
+    w.write(inflight_tx_record_version());
+    storage::record_batch_builder builder(cluster::group_infight_tx_batch_type, model::offset(0));
+    builder.set_producer_identity(pid.id, pid.epoch);
+    builder.set_control_type();
+    builder.add_raw_kw(std::move(key), reflection::to_iobuf(std::move(tx_entry)), std::vector<model::record_header>());
+    auto batch = std::move(builder).build();
+    auto reader = model::make_memory_record_batch_reader(std::move(batch));
+
+    auto e = co_await _partition->replicate(std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
+
+    if (!e) {
+        co_return txn_offset_commit_response(r, error_code::unknown_server_error);
+    }
+
+    for (const auto& t : r.data.topics) {
+        for (const auto& p : t.partitions) {
+            model::topic_partition tp(t.name, p.partition_index);
+            offset_metadata md{
+              .log_offset = e.value().last_offset,
+              .offset = p.committed_offset,
+              .metadata = p.committed_metadata.value_or(""),
+            };
+            // can we overwrite with lower offset?
+            ongoing_it->second.offsets[tp] = md;
+        }
+    }
+
     txn_offset_commit_response res;
     co_return res;
 }
 
 ss::future<offset_commit_response>
 group::store_offsets(offset_commit_request&& r) {
-    cluster::simple_batch_builder builder(
-      raft::data_batch_type, model::offset(0));
+    cluster::simple_batch_builder builder(raft::data_batch_type, model::offset(0));
 
-    std::vector<std::pair<model::topic_partition, offset_metadata>>
-      offset_commits;
+    std::vector<std::pair<model::topic_partition, offset_metadata>> offset_commits;
 
     for (const auto& t : r.data.topics) {
         for (const auto& p : t.partitions) {
@@ -1246,6 +1316,22 @@ group::store_offsets(offset_commit_request&& r) {
 
           return offset_commit_response(req, error);
       });
+}
+
+ss::future<mark_group_committed_result>
+group::handle_mark_group_committed(mark_group_committed_request&& r) {
+    if (in_state(group_state::dead)) {
+        co_return mark_group_committed_result(r, error_code::coordinator_not_available);
+    } else if (in_state(group_state::empty)) {
+        co_return co_await mark_committed(std::move(r));
+    } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        co_return co_await mark_committed(std::move(r));
+    } else if (in_state(group_state::completing_rebalance)) {
+        co_return mark_group_committed_result(r, error_code::rebalance_in_progress);
+    } else {
+        vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
+        co_return mark_group_committed_result(r, error_code::unknown_server_error);
+    }
 }
 
 ss::future<txn_offset_commit_response>

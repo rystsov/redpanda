@@ -34,6 +34,7 @@ static constexpr model::record_batch_type id_allocator_stm_batch_type{8};
 static constexpr model::record_batch_type tx_prepare_batch_type{9};
 static constexpr model::record_batch_type tx_fence_batch_type{10};
 static constexpr model::record_batch_type tm_update_batch_type{11};
+static constexpr model::record_batch_type group_infight_tx_batch_type{14};
 using consensus_ptr = ss::lw_shared_ptr<raft::consensus>;
 using broker_ptr = ss::lw_shared_ptr<model::broker>;
 

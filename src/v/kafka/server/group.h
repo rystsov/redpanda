@@ -95,6 +95,28 @@ std::ostream& operator<<(std::ostream&, group_state gs);
 
 ss::sstring group_state_to_kafka_name(group_state);
 
+struct mark_group_committed_request_data {
+    group_id group_id;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct mark_group_committed_request {
+    model::ntp ntp;
+    mark_group_committed_request_data data;
+};
+
+struct mark_group_committed_result {
+    kafka::error_code ec;
+
+    mark_group_committed_result() = default;
+
+    mark_group_committed_result(
+      [[maybe_unused]] mark_group_committed_request& request, error_code error) {
+        this->ec = error;
+    }
+};
+
 /// \brief A Kafka group.
 ///
 /// Container of members.
@@ -103,10 +125,19 @@ public:
     using clock_type = ss::lowres_clock;
     using duration_type = clock_type::duration;
 
+    static constexpr model::control_record_version inflight_tx_record_version{0};
+
     struct offset_metadata {
         model::offset log_offset;
         model::offset offset;
         ss::sstring metadata;
+        // TODO support leader_epoch
+    };
+
+    struct group_ongoing_tx {
+        model::producer_identity pid;
+        kafka::group_id group_id;
+        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
     };
 
     group(
@@ -394,6 +425,8 @@ public:
     void fail_offset_commit(
       const model::topic_partition& tp, const offset_metadata& md);
 
+    ss::future<mark_group_committed_result> mark_committed(mark_group_committed_request&& r);
+
     ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
     
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
@@ -403,6 +436,9 @@ public:
     
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);
+
+    ss::future<mark_group_committed_result>
+    handle_mark_group_committed(mark_group_committed_request&&);
 
     ss::future<offset_fetch_response>
     handle_offset_fetch(offset_fetch_request&& r);
@@ -457,6 +493,7 @@ private:
     absl::node_hash_map<model::topic_partition, offset_metadata> _offsets;
     absl::node_hash_map<model::topic_partition, offset_metadata>
       _pending_offset_commits;
+    absl::node_hash_map<int64_t, group_ongoing_tx> _ongoing_txs;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;

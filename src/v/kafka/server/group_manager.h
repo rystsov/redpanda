@@ -140,6 +140,9 @@ public:
     ss::future<txn_offset_commit_response>
     txn_offset_commit(txn_offset_commit_request&& request);
 
+    ss::future<mark_group_committed_result>
+    mark_group_committed(mark_group_committed_request&& request);
+
     /// \brief Handle a OffsetFetch request
     ss::future<offset_fetch_response>
     offset_fetch(offset_fetch_request&& request);
@@ -276,6 +279,18 @@ struct group_log_record_key {
     iobuf key;
 };
 
+struct group_log_inflight_tx_tp_update {
+    model::topic_partition tp;
+    model::offset offset;
+    int32_t leader_epoch;
+    std::optional<ss::sstring> metadata;
+};
+
+struct group_log_inflight_tx {
+    kafka::group_id group_id;
+    model::producer_identity pid;
+    std::vector<group_log_inflight_tx_tp_update> updates;
+};
 /*
  * This batch consumer is used during partition recovery to read, index, and
  * deduplicate both group and commit metadata snapshots.
@@ -297,6 +312,7 @@ struct recovery_batch_consumer {
     recovery_batch_consumer_state end_of_stream() { return std::move(st); }
 
     recovery_batch_consumer_state st;
+    absl::node_hash_map<int64_t, group::group_ongoing_tx> ongoing_txs;
     model::offset batch_base_offset;
 
     ss::abort_source& as;

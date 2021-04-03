@@ -13,6 +13,8 @@
 #include "cluster/partition_manager.h"
 #include "cluster/id_allocator_frontend.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
+#include "kafka/server/group.h"
+#include "kafka/server/group_router.h"
 #include <seastar/core/coroutine.hh>
 #include <algorithm>
 
@@ -250,8 +252,21 @@ tx_gateway_frontend::dispatch_commit_group_tx(model::node_id leader, kafka::grou
 }
 
 ss::future<commit_group_tx_reply>
-tx_gateway_frontend::do_commit_group_tx([[maybe_unused]] kafka::group_id group_id, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::tx_seq tx_seq, [[maybe_unused]] model::timeout_clock::duration timeout) {
-    vlog(clusterlog.warn, "SHAI do_commit_group_tx {}", group_id);
+tx_gateway_frontend::do_commit_group_tx(kafka::group_id group_id, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    kafka::mark_group_committed_request req;
+    req.data.group_id = group_id;
+    req.data.pid = pid;
+    req.data.tx_seq = tx_seq;
+    req.data.timeout = timeout;
+
+    auto reply = co_await _group_router.local().mark_group_committed(std::move(req));
+
+    if (reply.ec != kafka::error_code::none) {
+        co_return commit_group_tx_reply {
+            .ec = tx_errc::timeout
+        };
+    }
+    
     co_return commit_group_tx_reply();
 }
 
@@ -464,6 +479,7 @@ tx_gateway_frontend::init_tm_tx(kafka::transactional_id tx_id, model::timeout_cl
       model::kafka_internal_namespace, model::kafka_tx_topic);
     
     if (!_metadata_cache.local().contains(nt, model::partition_id(0))) {
+        vlog(clusterlog.warn, "can't find {}/0 partition", nt);
         co_return cluster::init_tm_tx_reply {
             .ec = tx_errc::partition_not_exists
         };
@@ -565,7 +581,6 @@ tx_gateway_frontend::do_init_tm_tx(ss::shard_id shard, kafka::transactional_id t
                   .ec = tx_errc::stm_not_found
               });
           }
-
 
           auto maybe_tx = stm->get_tx(tx_id);
 
