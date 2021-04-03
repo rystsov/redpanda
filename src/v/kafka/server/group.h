@@ -117,13 +117,6 @@ struct mark_group_committed_result {
     }
 };
 
-struct group_log_inflight_tx_tp_update {
-    model::topic_partition tp;
-    model::offset offset;
-    int32_t leader_epoch;
-    std::optional<ss::sstring> metadata;
-};
-
 /// \brief A Kafka group.
 ///
 /// Container of members.
@@ -133,6 +126,7 @@ public:
     using duration_type = clock_type::duration;
 
     static constexpr model::control_record_version inflight_tx_record_version{0};
+    static constexpr model::control_record_version commit_tx_record_version{0};
 
     struct offset_metadata {
         model::offset log_offset;
@@ -462,6 +456,8 @@ public:
         }
         return inserted;
     }
+
+    void insert_ongoing(group_ongoing_tx);
 
     // helper for the kafka api: describe groups
     described_group describe() const;

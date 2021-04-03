@@ -279,11 +279,6 @@ struct group_log_record_key {
     iobuf key;
 };
 
-struct group_log_inflight_tx {
-    kafka::group_id group_id;
-    model::producer_identity pid;
-    std::vector<group_log_inflight_tx_tp_update> updates;
-};
 /*
  * This batch consumer is used during partition recovery to read, index, and
  * deduplicate both group and commit metadata snapshots.
@@ -305,7 +300,6 @@ struct recovery_batch_consumer {
     recovery_batch_consumer_state end_of_stream() { return std::move(st); }
 
     recovery_batch_consumer_state st;
-    absl::node_hash_map<int64_t, group::group_ongoing_tx> ongoing_txs;
     model::offset batch_base_offset;
 
     ss::abort_source& as;

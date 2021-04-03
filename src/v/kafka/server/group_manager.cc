@@ -237,7 +237,7 @@ ss::future<> group_manager::handle_partition_leader_change(
                   0,
                   std::numeric_limits<size_t>::max(),
                   kafka_read_priority(),
-                  raft::data_batch_type,
+                  std::nullopt,
                   std::nullopt,
                   std::nullopt);
 
@@ -270,7 +270,6 @@ ss::future<> group_manager::handle_partition_leader_change(
  */
 ss::future<> group_manager::recover_partition(
   ss::lw_shared_ptr<cluster::partition> p, recovery_batch_consumer_state ctx) {
-    
     for (auto& [group_id, group_stm] : ctx.groups) {
         if (group_stm.has_data()) {
             auto group = get_group(group_id);
@@ -292,6 +291,19 @@ ss::future<> group_manager::recover_partition(
             }
         }
     }
+
+    for (auto& [group_id, group_stm] : ctx.groups) {
+        auto group = get_group(group_id);
+        if (!group) {
+            group = ss::make_lw_shared<kafka::group>(group_id, group_state::empty, _conf, p);
+        }
+        _groups.emplace(group_id, group);
+
+        for (const auto& [_, tx] : group_stm._ongoing_txs) {            
+            group->insert_ongoing(tx);
+        }
+    }
+
     /*
      * <kafka>if the cache already contains a group which should be removed,
      * raise an error. Note that it is possible (however unlikely) for a
@@ -344,31 +356,33 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
 
         auto val_buf = record.release_value();
         auto val = reflection::from_iobuf<group_log_inflight_tx>(std::move(val_buf));
-
-        auto tx = group::group_ongoing_tx {
-            .pid = val.pid,
-            .group_id = val.group_id
-        };
-  
-        auto [ongoing_it, inserted] = ongoing_txs.try_emplace(tx.pid.id, tx);
-        if (!inserted && ongoing_it->second.pid.epoch > tx.pid.epoch) {
-            klog.warn("a logged tx {} is fenced off by prev logged tx {}", val.pid, ongoing_it->second.pid);
-            return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
-        } else if (!inserted && ongoing_it->second.pid.epoch < tx.pid.epoch) {
-            klog.warn("a logged tx {} overwrites prev logged tx {}", val.pid, ongoing_it->second.pid);
-            ongoing_it->second.pid = tx.pid;
-            ongoing_it->second.offsets.clear();
-        }
         
-        for (const auto& update : val.updates) {
-            group::offset_metadata md {
-              .log_offset = batch.last_offset(),
-              .offset = update.offset,
-              .metadata = update.metadata.value_or(""),
-            };
-            // TODO: support leader_epoch
-            ongoing_it->second.offsets[update.tp] = md;
-        }
+        auto [group_it, _] = st.groups.try_emplace(val.group_id, group_stm());
+        group_it->second.apply(batch.last_offset(), val);
+
+        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+    } else if (batch.header().type == cluster::group_commit_tx_batch_type) {
+        vassert(batch.record_count() == 1, "prepare batch must contain a single record");
+        auto r = batch.copy_records();
+        auto& record = *r.begin();
+        auto key_buf = record.release_key();
+        kafka::request_reader buf_reader(std::move(key_buf));
+        auto version = model::control_record_version(buf_reader.read_int16());
+
+        const auto& hdr = batch.header();
+        [[maybe_unused]] auto bid = model::batch_identity::from(hdr);
+
+        vassert(
+          version == group::commit_tx_record_version,
+          "unknown group inflight tx record version: {} expected: {}",
+          version,
+          group::commit_tx_record_version);
+        
+        auto val_buf = record.release_value();
+        auto val = reflection::from_iobuf<group_log_commit_tx>(std::move(val_buf));
+        
+        auto [group_it, _] = st.groups.try_emplace(val.group_id, group_stm());
+        group_it->second.commit(bid);
 
         return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
     } else {

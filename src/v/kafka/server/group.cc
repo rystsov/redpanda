@@ -1174,17 +1174,61 @@ void group::fail_offset_commit(
     }
 }
 
+void group::insert_ongoing(group_ongoing_tx tx) {
+    auto [ongoing_it, inserted] = _ongoing_txs.try_emplace(tx.pid.id, tx);
+    if (!inserted && ongoing_it->second.pid.epoch > tx.pid.epoch) {
+        vlog(klog.info, "already ongoing tx {} fenced out currect tx {}", ongoing_it->second.pid, tx.pid);
+        return;
+    } else if (!inserted && ongoing_it->second.pid.epoch < tx.pid.epoch) {
+        vlog(klog.info, "current tx {} fenced already ongoing tx {}", tx.pid, ongoing_it->second.pid);
+        ongoing_it->second.pid = tx.pid;
+        ongoing_it->second.offsets.clear();
+    }
+
+    for (const auto& [tp, md] : tx.offsets) {
+        ongoing_it->second.offsets[tp] = md;
+    }
+}
+
 ss::future<mark_group_committed_result>
-group::mark_committed(mark_group_committed_request&& r) {
+group::mark_committed(mark_group_committed_request&& req) {
+    auto r = std::move(req);
     auto ongoing_it = _ongoing_txs.find(r.data.pid.id);
     if (ongoing_it == _ongoing_txs.end()) {
-        vlog(klog.info, "can't find a tx {} to commit", r.data.pid);
-        co_return mark_group_committed_result(r, error_code::unknown_server_error);
+        vlog(klog.warn, "can't find a tx {}, probably already comitted", r.data.pid);
+        co_return mark_group_committed_result(r, error_code::none);
     }
 
     if (ongoing_it->second.pid.epoch != r.data.pid.epoch) {
         vlog(klog.info, "ongoing tx {} doesn't match committing tx {}", ongoing_it->second.pid, r.data.pid);
         co_return mark_group_committed_result(r, error_code::invalid_producer_epoch);
+    }
+
+    iobuf key;
+    kafka::response_writer w(key);
+    w.write(commit_tx_record_version());
+    storage::record_batch_builder builder(cluster::group_commit_tx_batch_type, model::offset(0));
+    builder.set_producer_identity(r.data.pid.id, r.data.pid.epoch);
+    builder.set_control_type();
+    group_log_commit_tx commit_tx;
+    commit_tx.group_id = r.data.group_id;
+    builder.add_raw_kw(std::move(key), reflection::to_iobuf(std::move(commit_tx)), std::vector<model::record_header>());
+    auto batch = std::move(builder).build();
+    auto reader = model::make_memory_record_batch_reader(std::move(batch));
+    
+    auto e = co_await _partition->replicate(std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
+
+    if (!e) {
+        co_return mark_group_committed_result(r, error_code::unknown_server_error);
+    }
+
+    ongoing_it = _ongoing_txs.find(r.data.pid.id);
+    if (ongoing_it == _ongoing_txs.end()) {
+        co_return mark_group_committed_result();
+    }
+
+    if (ongoing_it->second.pid.epoch != r.data.pid.epoch) {
+        co_return mark_group_committed_result();
     }
 
     for (const auto& [tp, md] : ongoing_it->second.offsets) {
@@ -1200,7 +1244,8 @@ group::mark_committed(mark_group_committed_request&& r) {
 }
 
 ss::future<txn_offset_commit_response>
-group::store_txn_offsets(txn_offset_commit_request&& r) {
+group::store_txn_offsets(txn_offset_commit_request&& req) {
+    auto r = std::move(req);
     model::producer_identity pid {
         .id = r.data.producer_id,
         .epoch = r.data.producer_epoch

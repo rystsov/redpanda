@@ -188,6 +188,7 @@ ss::future<tm_stm::op_status> tm_stm::re_register_producer(
     tx.pid = pid;
     tx.tx_seq += 1;
     tx.partitions.clear();
+    tx.groups.clear();
 
     // hack: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95599
     auto func = [this, term, tx]() { return save_tx(term, tx); };

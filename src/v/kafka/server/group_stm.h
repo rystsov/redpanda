@@ -4,6 +4,7 @@
 #include "kafka/protocol/fwd.h"
 #include "kafka/server/logger.h"
 #include "kafka/server/member.h"
+#include "kafka/server/group.h"
 #include "kafka/types.h"
 #include "model/fundamental.h"
 #include "model/record.h"
@@ -61,6 +62,24 @@ struct group_log_offset_metadata {
     operator<<(std::ostream&, const group_log_offset_metadata&);
 };
 
+struct group_log_inflight_tx_tp_update {
+    model::topic_partition tp;
+    model::offset offset;
+    int32_t leader_epoch;
+    std::optional<ss::sstring> metadata;
+};
+
+struct group_log_inflight_tx {
+    kafka::group_id group_id;
+    // TODO: get rid of pid, we have it in the headers
+    model::producer_identity pid;
+    std::vector<group_log_inflight_tx_tp_update> updates;
+};
+
+struct group_log_commit_tx {
+    kafka::group_id group_id;
+};
+
 } // namespace kafka
 
 namespace std {
@@ -88,6 +107,9 @@ public:
     }
     void update_offset(group_log_offset_key, model::offset, group_log_offset_metadata&&);
     void remove_offset(group_log_offset_key);
+    void apply(model::offset, group_log_inflight_tx);
+    void commit(model::batch_identity);
+
     bool has_data() {
         return !_is_removed && (_is_loaded || _offsets.size() > 0);
     }
@@ -96,6 +118,7 @@ public:
     }
 
     absl::node_hash_map<group_log_offset_key, std::pair<model::offset, group_log_offset_metadata>> _offsets;
+    absl::node_hash_map<int64_t, group::group_ongoing_tx> _ongoing_txs;
 private:
     group_log_group_metadata _metadata;
     bool _is_loaded {false};
