@@ -117,6 +117,13 @@ struct mark_group_committed_result {
     }
 };
 
+struct group_log_inflight_tx_tp_update {
+    model::topic_partition tp;
+    model::offset offset;
+    int32_t leader_epoch;
+    std::optional<ss::sstring> metadata;
+};
+
 /// \brief A Kafka group.
 ///
 /// Container of members.
