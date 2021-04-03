@@ -272,13 +272,6 @@ struct group_log_offset_metadata {
     operator<<(std::ostream&, const group_log_offset_metadata&);
 };
 
-struct group_log_inflight_tx_tp_update {
-    model::topic_partition tp;
-    model::offset offset;
-    int32_t leader_epoch;
-    std::optional<ss::sstring> metadata;
-};
-
 struct group_log_inflight_tx {
     kafka::group_id group_id;
     model::producer_identity pid;

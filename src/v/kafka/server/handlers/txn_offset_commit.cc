@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0
 
 #include "kafka/server/handlers/txn_offset_commit.h"
-#include "kafka/server/handlers/offset_commit.h"
 
 #include "cluster/topics_frontend.h"
 #include "kafka/server/group_manager.h"
@@ -25,90 +24,31 @@ namespace kafka {
 
 struct txn_offset_commit_ctx {
     request_context rctx;
-    offset_commit_request request;
+    txn_offset_commit_request request;
     ss::smp_service_group ssg;
 
     // topic partitions found not to existent prior to processing. responses for
     // these are patched back into the final response after processing.
     absl::
-      flat_hash_map<model::topic, std::vector<offset_commit_response_partition>>
+      flat_hash_map<model::topic, std::vector<txn_offset_commit_response_partition>>
         nonexistent_tps;
 
     txn_offset_commit_ctx(
       request_context&& rctx,
-      offset_commit_request&& request,
+      txn_offset_commit_request&& request,
       ss::smp_service_group ssg)
       : rctx(std::move(rctx))
       , request(std::move(request))
       , ssg(ssg) {}
 };
 
-static offset_commit_request unwrap_tx(txn_offset_commit_request tx_req) {
-    offset_commit_request req;
-
-    req.is_tx = true;
-    req.data.group_id = tx_req.data.group_id;
-
-    // support only 2.4 tx
-    // 2.5 requires
-    // https://cwiki.apache.org/confluence/display/KAFKA/KIP-447%3A+Producer+scalability+for+exactly+once+semantics
-    // which isn't there yet
-
-    // req.data.generation_id = ...
-    // req.data.member_id = ...
-    // req.data.group_instance_id = ...
-
-    for (const auto& tx_topic : tx_req.data.topics) {
-        offset_commit_request_topic topic;
-        topic.name = tx_topic.name;
-        for (const auto& tx_partition : tx_topic.partitions) {
-            offset_commit_request_partition partition;
-            partition.partition_index = tx_partition.partition_index;
-            partition.committed_offset = tx_partition.committed_offset;
-            partition.committed_leader_epoch = tx_partition.committed_leader_epoch;
-            // partition.commit_timestamp = ...
-            partition.committed_metadata = tx_partition.committed_metadata;
-            topic.partitions.push_back(partition);
-        }
-        req.data.topics.push_back(topic);
-    }
-
-    return req;
-}
-
-static txn_offset_commit_response wrap_tx(offset_commit_response res) {
-    txn_offset_commit_response tx_res;
-
-    tx_res.data.throttle_time_ms = res.data.throttle_time_ms;
-
-    for (const auto& topic : res.data.topics) {
-        txn_offset_commit_response_topic tx_topic;
-        tx_topic.name = topic.name;
-        for (const auto& partition : topic.partitions) {
-            txn_offset_commit_response_partition tx_partition;
-            tx_partition.partition_index = partition.partition_index;
-            tx_partition.error_code = partition.error_code;
-            tx_topic.partitions.push_back(tx_partition);
-        }
-        tx_res.data.topics.push_back(tx_topic);
-    }
-
-    return tx_res;
-}
-
 template<>
 ss::future<response_ptr>
 txn_offset_commit_handler::handle(request_context ctx, ss::smp_service_group ssg) {
-    txn_offset_commit_request tx_request;
-    tx_request.decode(ctx.reader(), ctx.header().version);
+    txn_offset_commit_request request;
+    request.decode(ctx.reader(), ctx.header().version);
 
-    auto request = unwrap_tx(tx_request);
     klog.trace("Handling request {}", request);
-
-    if (request.data.group_instance_id) {
-        return ctx.respond(
-          offset_commit_response(request, error_code::unsupported_version));
-    }
 
     txn_offset_commit_ctx octx(std::move(ctx), std::move(request), ssg);
 
@@ -142,7 +82,7 @@ txn_offset_commit_handler::handle(request_context ctx, ss::smp_service_group ssg
             auto split = std::partition(
               it->partitions.begin(),
               it->partitions.end(),
-              [&md](const offset_commit_request_partition& p) {
+              [&md](const txn_offset_commit_request_partition& p) {
                   return std::any_of(
                     md->partitions.cbegin(),
                     md->partitions.cend(),
@@ -156,7 +96,7 @@ txn_offset_commit_handler::handle(request_context ctx, ss::smp_service_group ssg
             if (split != it->partitions.end()) {
                 auto& parts = octx.nonexistent_tps[it->name];
                 for (auto part = split; part != it->partitions.end(); part++) {
-                    parts.push_back(offset_commit_response_partition{
+                    parts.push_back(txn_offset_commit_response_partition{
                       .partition_index = part->partition_index,
                       .error_code = error_code::unknown_topic_or_partition,
                     });
@@ -170,7 +110,7 @@ txn_offset_commit_handler::handle(request_context ctx, ss::smp_service_group ssg
              */
             auto& parts = octx.nonexistent_tps[it->name];
             for (const auto& part : it->partitions) {
-                parts.push_back(offset_commit_response_partition{
+                parts.push_back(txn_offset_commit_response_partition{
                   .partition_index = part.partition_index,
                   .error_code = error_code::unknown_topic_or_partition,
                 });
@@ -181,8 +121,8 @@ txn_offset_commit_handler::handle(request_context ctx, ss::smp_service_group ssg
 
     return ss::do_with(std::move(octx), [](txn_offset_commit_ctx& octx) {
         return octx.rctx.groups()
-          .offset_commit(std::move(octx.request))
-          .then([&octx](offset_commit_response resp) {
+          .txn_offset_commit(std::move(octx.request))
+          .then([&octx](txn_offset_commit_response resp) {
               if (unlikely(!octx.nonexistent_tps.empty())) {
                   /*
                    * copy over partitions for topics that had some partitions
@@ -203,15 +143,13 @@ txn_offset_commit_handler::handle(request_context ctx, ss::smp_service_group ssg
                    * response directly.
                    */
                   for (auto& topic : octx.nonexistent_tps) {
-                      resp.data.topics.push_back(offset_commit_response_topic{
+                      resp.data.topics.push_back(txn_offset_commit_response_topic{
                         .name = topic.first,
                         .partitions = std::move(topic.second),
                       });
                   }
               }
-              return octx.rctx.respond(wrap_tx(std::move(resp)));
-              //return ss::make_exception_future<response_ptr>(std::runtime_error(
-              //  fmt::format("Unsupported API {}", octx.rctx.header().key)));
+              return octx.rctx.respond(std::move(resp));
           });
     });
 }

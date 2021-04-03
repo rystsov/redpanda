@@ -1175,9 +1175,27 @@ void group::fail_offset_commit(
 }
 
 ss::future<mark_group_committed_result>
-group::mark_committed([[maybe_unused]] mark_group_committed_request&& r) {
-    vlog(klog.info, "SHAI do_commit_group_tx {}", r.data.group_id);
-    // look ongoing & commit it
+group::mark_committed(mark_group_committed_request&& r) {
+    auto ongoing_it = _ongoing_txs.find(r.data.pid.id);
+    if (ongoing_it == _ongoing_txs.end()) {
+        vlog(klog.info, "can't find a tx {} to commit", r.data.pid);
+        co_return mark_group_committed_result(r, error_code::unknown_server_error);
+    }
+
+    if (ongoing_it->second.pid.epoch != r.data.pid.epoch) {
+        vlog(klog.info, "ongoing tx {} doesn't match committing tx {}", ongoing_it->second.pid, r.data.pid);
+        co_return mark_group_committed_result(r, error_code::invalid_producer_epoch);
+    }
+
+    for (const auto& [tp, md] : ongoing_it->second.offsets) {
+        auto o_it = _offsets.find(tp);
+        if (o_it == _offsets.end() || o_it->second.log_offset < md.log_offset) {
+            _offsets[tp] = md;
+        }
+    }
+
+    _ongoing_txs.erase(ongoing_it);
+
     co_return mark_group_committed_result();
 }
 
@@ -1248,8 +1266,7 @@ group::store_txn_offsets(txn_offset_commit_request&& r) {
         }
     }
 
-    txn_offset_commit_response res;
-    co_return res;
+    co_return txn_offset_commit_response(r, error_code::none);
 }
 
 ss::future<offset_commit_response>
