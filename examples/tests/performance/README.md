@@ -68,7 +68,7 @@ Test executes a transation executing a single `sendOffsetsToTransaction` X times
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
-| Redpanda | 766 ms | 3 ms | 3.5 ms | 10 ms|
+| Redpanda | 942 ms | 3.2 ms | 4 ms | 16 ms|
 | Kafka | 24292 ms | 22 ms | 121 ms | 132 ms |
 
 ## StreamBench
@@ -80,5 +80,5 @@ Test executes a transation reading an event from an input stream, transforming i
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
-| Redpanda | 1118 ms | 4.3 ms | 5 ms | 15 ms|
+| Redpanda | 1238 ms | 4.4 ms | 5.7 ms | 20 ms|
 | Kafka | 30574 ms | 23 ms | 150 ms | 163 ms |
