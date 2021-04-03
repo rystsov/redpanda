@@ -370,24 +370,69 @@ ss::future<> group_manager::recover_partition(
 
 ss::future<ss::stop_iteration>
 recovery_batch_consumer::operator()(model::record_batch batch) {
-    if (unlikely(batch.header().type != raft::data_batch_type)) {
-        klog.trace("ignorning batch with type {}", int(batch.header().type));
-        return ss::make_ready_future<ss::stop_iteration>(
-          ss::stop_iteration::no);
-    }
     if (as.abort_requested()) {
         return ss::make_ready_future<ss::stop_iteration>(
           ss::stop_iteration::yes);
     }
-    batch_base_offset = batch.base_offset();
-    return ss::do_with(
-             std::move(batch),
-             [this](model::record_batch& batch) {
-                 return model::for_each_record(batch, [this](model::record& r) {
-                     return handle_record(std::move(r));
-                 });
-             })
-      .then([] { return ss::stop_iteration::no; });
+
+    if (batch.header().type == raft::data_batch_type) {
+        batch_base_offset = batch.base_offset();
+        return ss::do_with(
+                std::move(batch),
+                [this](model::record_batch& batch) {
+                    return model::for_each_record(batch, [this](model::record& r) {
+                        return handle_record(std::move(r));
+                    });
+                })
+          .then([] { return ss::stop_iteration::no; });
+    } else if (batch.header().type == cluster::group_infight_tx_batch_type) {
+        vassert(batch.record_count() == 1, "prepare batch must contain a single record");
+        auto r = batch.copy_records();
+        auto& record = *r.begin();
+        auto key_buf = record.release_key();
+        kafka::request_reader buf_reader(std::move(key_buf));
+        auto version = model::control_record_version(buf_reader.read_int16());
+
+        vassert(
+          version == group::inflight_tx_record_version,
+          "unknown group inflight tx record version: {} expected: {}",
+          version,
+          group::inflight_tx_record_version);
+
+        auto val_buf = record.release_value();
+        auto val = reflection::from_iobuf<group_log_inflight_tx>(std::move(val_buf));
+
+        auto tx = group::group_ongoing_tx {
+            .pid = val.pid,
+            .group_id = val.group_id
+        };
+  
+        auto [ongoing_it, inserted] = ongoing_txs.try_emplace(tx.pid.id, tx);
+        if (!inserted && ongoing_it->second.pid.epoch > tx.pid.epoch) {
+            klog.warn("a logged tx {} is fenced off by prev logged tx {}", val.pid, ongoing_it->second.pid);
+            return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+        } else if (!inserted && ongoing_it->second.pid.epoch < tx.pid.epoch) {
+            klog.warn("a logged tx {} overwrites prev logged tx {}", val.pid, ongoing_it->second.pid);
+            ongoing_it->second.pid = tx.pid;
+            ongoing_it->second.offsets.clear();
+        }
+        
+        for (const auto& update : val.updates) {
+            group::offset_metadata md {
+              .log_offset = batch.last_offset(),
+              .offset = update.offset,
+              .metadata = update.metadata.value_or(""),
+            };
+            // TODO: support leader_epoch
+            ongoing_it->second.offsets[update.tp] = md;
+        }
+
+        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+    } else {
+        klog.trace("ignorning batch with type {}", int(batch.header().type));
+        return ss::make_ready_future<ss::stop_iteration>(
+          ss::stop_iteration::no);
+    }
 }
 
 ss::future<> recovery_batch_consumer::handle_record(model::record r) {
@@ -602,7 +647,7 @@ group_manager::leave_group(leave_group_request&& r) {
 }
 
 ss::future<txn_offset_commit_response>
-group_manager::txn_offset_commit([[maybe_unused]] txn_offset_commit_request&& r) {
+group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
     auto error = validate_group_status(
       r.ntp, r.data.group_id, offset_commit_api::key);
     if (error != error_code::none) {
@@ -621,6 +666,22 @@ group_manager::txn_offset_commit([[maybe_unused]] txn_offset_commit_request&& r)
     }
 
     co_return co_await group->handle_txn_offset_commit(std::move(r));
+}
+
+ss::future<mark_group_committed_result>
+group_manager::mark_group_committed(mark_group_committed_request&& r) {
+    auto error = validate_group_status(
+      r.ntp, r.data.group_id, offset_commit_api::key);
+    if (error != error_code::none) {
+        co_return mark_group_committed_result(r, error);
+    }
+
+    auto group = get_group(r.data.group_id);
+    if (!group) {
+        co_return mark_group_committed_result(r, error_code::unknown_server_error);
+    }
+
+    co_return co_await group->handle_mark_group_committed(std::move(r));
 }
 
 ss::future<offset_commit_response>
