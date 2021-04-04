@@ -41,14 +41,14 @@ Test executes a transaction inserting two events to two topics X times.
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.TxSendBench
 
-### Single node
+### Single node (p50 x10)
 
 | System | 1000 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 4110 ms | 2.9 ms | 3.9 ms | 16.5 ms|
 | Kafka | 39027 ms | 32 ms | 39 ms | 79 ms |
 
-### 3-nodes cluser
+### 3-nodes cluser (p50 x7)
 
 | System | 1000 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
@@ -61,14 +61,14 @@ Test executes a transaction writing a single event to a topic and after commit r
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.FetchBench
 
-### Single node
+### Single node (p50 x12)
 
 | System | 1000 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 3754 ms | 2.3 ms | 3.3 ms | 18 ms|
 | Kafka | 39761 ms | 16 ms | 41 ms | 129 ms |
 
-### 3-nodes cluser
+### 3-nodes cluser (p50 x7)
 
 | System | 1000 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
@@ -81,14 +81,14 @@ Test executes a transation executing a single `sendOffsetsToTransaction` X times
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.TxSendOffsetsBench
 
-### Single node
+### Single node (p50 x30)
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 942 ms | 3.2 ms | 4 ms | 16 ms|
 | Kafka | 24292 ms | 22 ms | 121 ms | 132 ms |
 
-### 3-nodes cluser
+### 3-nodes cluser (p50 x30)
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
@@ -102,14 +102,14 @@ Test executes a transation reading an event from an input stream, transforming i
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.StreamBench
 
-### Single node
+### Single node (p50 x26)
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 1238 ms | 4.4 ms | 5.7 ms | 20 ms|
 | Kafka | 30574 ms | 23 ms | 150 ms | 163 ms |
 
-### 3-nodes cluser
+### 3-nodes cluser (p50 x24)
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
