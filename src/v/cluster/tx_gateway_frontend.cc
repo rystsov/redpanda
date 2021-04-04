@@ -186,6 +186,7 @@ ss::future<commit_group_tx_reply>
 tx_gateway_frontend::commit_group_tx(kafka::group_id group_id, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
     if (!ntp_opt) {
+        vlog(clusterlog.info, "can't find ntp for {}", group_id);
         co_return commit_group_tx_reply {
             .ec = tx_errc::partition_not_exists
         };
@@ -195,19 +196,20 @@ tx_gateway_frontend::commit_group_tx(kafka::group_id group_id, model::producer_i
 
     auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
     if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        vlog(clusterlog.info, "can' find meta info for {}", ntp);
         co_return commit_group_tx_reply {
             .ec = tx_errc::partition_not_exists
         };
     }
 
-    auto leader = _leaders.local().get_leader(ntp);
-    if (!leader) {
+    auto leader_opt = _leaders.local().get_leader(ntp);
+    if (!leader_opt) {
         vlog(clusterlog.warn, "can't find a leader for {}", ntp);
         co_return commit_group_tx_reply {
             .ec = tx_errc::leader_not_found
         };
     }
-
+    auto leader = leader_opt.value();
     auto _self = _controller->self();
 
     if (leader == _self) {
@@ -215,12 +217,11 @@ tx_gateway_frontend::commit_group_tx(kafka::group_id group_id, model::producer_i
     }
 
     vlog(clusterlog.trace, "dispatching commit group tx to {} from {}", leader, _self);
-
-    co_return co_await dispatch_commit_group_tx(leader.value(), group_id, pid, tx_seq, timeout);
+    co_return co_await dispatch_commit_group_tx(leader, group_id, pid, tx_seq, timeout);
 }
 
 ss::future<commit_group_tx_reply>
-tx_gateway_frontend::dispatch_commit_group_tx(model::node_id leader, kafka::group_id group_id, [[maybe_unused]] model::producer_identity pid, [[maybe_unused]] model::tx_seq tx_seq, [[maybe_unused]] model::timeout_clock::duration timeout) {
+tx_gateway_frontend::dispatch_commit_group_tx(model::node_id leader, kafka::group_id group_id, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     return _connection_cache.local()
       .with_node_client<cluster::tx_gateway_client_protocol>(
         _controller->self(),
@@ -485,30 +486,31 @@ tx_gateway_frontend::init_tm_tx(kafka::transactional_id tx_id, model::timeout_cl
         };
     }
 
-    auto leader = _leaders.local().get_leader(model::kafka_tx_ntp);
+    auto leader_opt = _leaders.local().get_leader(model::kafka_tx_ntp);
 
     auto i=0;
-    while (!leader && i<30) {
+    while (!leader_opt && i<30) {
         co_await ss::sleep(0'500ms);
-        leader = _leaders.local().get_leader(model::kafka_tx_ntp);
+        leader_opt = _leaders.local().get_leader(model::kafka_tx_ntp);
     }
 
-    if (!leader) {
+    if (!leader_opt) {
         vlog(clusterlog.warn, "can't find a leader for {}", model::kafka_tx_ntp);
         co_return cluster::init_tm_tx_reply {
             .ec = tx_errc::leader_not_found
         };
     }
-
+    
+    auto leader = leader_opt.value();
     auto _self = _controller->self();
 
     if (leader == _self) {
         co_return co_await do_init_tm_tx(tx_id, timeout);
     }
 
-    vlog(clusterlog.warn, "dispatching abort tx to {} from {}", leader, _self);
+    vlog(clusterlog.trace, "dispatching abort tx to {} from {}", leader, _self);
 
-    co_return co_await dispatch_init_tm_tx(leader.value(), tx_id, timeout);
+    co_return co_await dispatch_init_tm_tx(leader, tx_id, timeout);
 }
 
 ss::future<init_tm_tx_reply>
