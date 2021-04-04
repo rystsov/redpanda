@@ -33,7 +33,7 @@ See settings in `examples/kafka-single-node`. It's set to max consistency to avo
 
 # Benchmarks
 
-Testing Redpanda & Kafka on a single node.
+Testing Redpanda & Kafka on a single node (laptop, ThinkPad P53 Core i9 9th gen) and a 3-nodes cluster (AWS, i3.large).
 
 ## TxSendBench
 
@@ -41,11 +41,19 @@ Test executes a transaction inserting two events to two topics X times.
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.TxSendBench
 
+### Single node
 
 | System | 1000 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 4110 ms | 2.9 ms | 3.9 ms | 16.5 ms|
 | Kafka | 39027 ms | 32 ms | 39 ms | 79 ms |
+
+### 3-nodes cluser
+
+| System | 1000 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 3813 ms | 3.1 ms | 3.7 ms | 11.7 ms|
+| Kafka | 30073 ms | 5.7 ms | 25.5 ms | 68 ms |
 
 ## FetchBench
 
@@ -53,11 +61,19 @@ Test executes a transaction writing a single event to a topic and after commit r
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.FetchBench
 
+### Single node
 
 | System | 1000 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 3754 ms | 2.3 ms | 3.3 ms | 18 ms|
 | Kafka | 39761 ms | 16 ms | 41 ms | 129 ms |
+
+### 3-nodes cluser
+
+| System | 1000 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 4273 ms | 3.1 ms | 3.8 ms | 29.8 ms|
+| Kafka | 14828 ms | 6.5 ms | 27.5 ms | 56.4 ms |
 
 ## TxSendOffsetsBench
 
@@ -65,11 +81,20 @@ Test executes a transation executing a single `sendOffsetsToTransaction` X times
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.TxSendOffsetsBench
 
+### Single node
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 942 ms | 3.2 ms | 4 ms | 16 ms|
 | Kafka | 24292 ms | 22 ms | 121 ms | 132 ms |
+
+### 3-nodes cluser
+
+| System | 200 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 710 ms | 2.5 ms | 3.5 ms | 6.6 ms|
+| Kafka | 21579 ms | 7.4 ms | 107 ms | 126 ms |
+
 
 ## StreamBench
 
@@ -77,8 +102,16 @@ Test executes a transation reading an event from an input stream, transforming i
 
     java -cp $(pwd)/target/performance-1.0-SNAPSHOT.jar:$(pwd)/target/dependency/* io.vectorized.tests.StreamBench
 
+### Single node
 
 | System | 200 txes | min | median | max |
 | ------ | --------- | ---- | ------- | --- |
 | Redpanda | 1238 ms | 4.4 ms | 5.7 ms | 20 ms|
 | Kafka | 30574 ms | 23 ms | 150 ms | 163 ms |
+
+### 3-nodes cluser
+
+| System | 200 txes | min | median | max |
+| ------ | --------- | ---- | ------- | --- |
+| Redpanda | 1131 ms | 4.5 ms | 5.4 ms | 10.5 ms|
+| Kafka | 26524 ms | 14.7 ms | 132 ms | 154 ms |
