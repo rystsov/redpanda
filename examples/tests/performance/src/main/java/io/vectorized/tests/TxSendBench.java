@@ -66,7 +66,7 @@ public class TxSendBench
 
     public static void main( String[] args ) throws Exception
     {
-        var bench = new TxSendBench("172.31.18.142:9092", "my-tx-1");
+        var bench = new TxSendBench("172.31.20.243:9092", "my-tx-1");
         bench.warmup("topic1", "topic2", 100);
         bench.measure("topic1", "topic2", 1000);
     }

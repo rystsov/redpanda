@@ -72,7 +72,7 @@ public class BatchBench
             System.out.println("BatchBench num of messages (e.g. 200000), max in flight requests (e.g. 1), batch size (e.g. 1384)");
             return;
         } 
-        var bench = new BatchBench("172.31.18.142:9092", "topic1");
+        var bench = new BatchBench("172.31.20.243:9092", "topic1");
         bench.initProducer("my-tx-1", inFlight, batchSize);
         bench.measure(messages);
     }

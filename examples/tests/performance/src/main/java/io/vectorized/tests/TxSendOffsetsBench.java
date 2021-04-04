@@ -120,7 +120,7 @@ public class TxSendOffsetsBench
 
     public static void main( String[] args ) throws Exception
     {
-        var bench = new TxSendOffsetsBench("172.31.18.142:9092", "topic1");
+        var bench = new TxSendOffsetsBench("172.31.20.243:9092", "topic1");
         bench.initProducer("my-tx-1");
         
         bench.initConsumer("groupId");
