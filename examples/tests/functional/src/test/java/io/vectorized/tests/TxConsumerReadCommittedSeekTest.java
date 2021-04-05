@@ -20,12 +20,12 @@ public class TxConsumerReadCommittedSeekTest extends Consts
     static void initAll() throws Exception {
         // reusing tx ids to abort any ongoing transactions
         
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
 
-        producer = new TxProducer(connection, txId2);
+        producer = new TxProducer(getConnection(), txId2);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
@@ -34,11 +34,11 @@ public class TxConsumerReadCommittedSeekTest extends Consts
     @Test
     public void txlessSeekTest() throws Exception
     {
-        var producer = new SimpleProducer(connection);
+        var producer = new SimpleProducer(getConnection());
         long offset = producer.send(topic1, "key1", "value1");
         producer.close();
 
-        var consumer = new TxConsumer(connection, topic1, true);
+        var consumer = new TxConsumer(getConnection(), topic1, true);
         consumer.seekToEnd();
         
         int retries = 8;
@@ -57,12 +57,12 @@ public class TxConsumerReadCommittedSeekTest extends Consts
     @Test
     public void txSeekTest() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         long offset = producer.commitTx(topic1, "key1", "value1");
         producer.close();
 
-        var consumer = new TxConsumer(connection, topic1, true);
+        var consumer = new TxConsumer(getConnection(), topic1, true);
         consumer.seekToEnd();
 
         int retries = 8;
@@ -81,12 +81,12 @@ public class TxConsumerReadCommittedSeekTest extends Consts
     @Test
     public void seekRespectsOngoingTx() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.beginTransaction();
         long offset = producer.send(topic1, "key1", "value1");
         
-        var consumer = new TxConsumer(connection, topic1, true);
+        var consumer = new TxConsumer(getConnection(), topic1, true);
         consumer.seekToEnd();
         assertThat(consumer.position(), lessThanOrEqualTo(offset));
         

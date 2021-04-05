@@ -15,7 +15,7 @@ public class TxProducerTest extends Consts
     @Test
     public void initPasses() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.close();
     }
@@ -23,7 +23,7 @@ public class TxProducerTest extends Consts
     @Test
     public void txPasses() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
@@ -32,7 +32,7 @@ public class TxProducerTest extends Consts
     @Test
     public void txesPass() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.commitTx(topic1, "key2", "value2");
@@ -42,7 +42,7 @@ public class TxProducerTest extends Consts
     @Test
     public void abortPasses() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.abortTx(topic1, "key1", "value1");
         producer.close();
@@ -50,8 +50,8 @@ public class TxProducerTest extends Consts
 
     @Test
     public void commutingTxesPass() throws Exception {
-        var p1 = new TxProducer(connection, txId1);
-        var p2 = new TxProducer(connection, txId2);
+        var p1 = new TxProducer(getConnection(), txId1);
+        var p2 = new TxProducer(getConnection(), txId2);
         p1.initTransactions();
         p1.beginTransaction();
         p1.send(topic1, "key1", "p1:value1");
@@ -64,8 +64,8 @@ public class TxProducerTest extends Consts
 
     @Test
     public void conflictingTxesFail() throws Exception {
-        var p1 = new TxProducer(connection, txId1);
-        var p2 = new TxProducer(connection, txId1);
+        var p1 = new TxProducer(getConnection(), txId1);
+        var p2 = new TxProducer(getConnection(), txId1);
         p1.initTransactions();
         p1.beginTransaction();
         p1.send(topic1, "key1", "p1:value1");

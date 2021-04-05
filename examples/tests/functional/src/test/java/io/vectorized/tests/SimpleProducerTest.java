@@ -12,7 +12,7 @@ public class SimpleProducerTest extends Consts
     @Test
     public void sendPasses() throws Exception
     {
-        var producer = new SimpleProducer(connection);
+        var producer = new SimpleProducer(getConnection());
         producer.send(topic1, "key1", "value1");
         producer.close();
     }

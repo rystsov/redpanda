@@ -18,12 +18,12 @@ public class TxStreamTest extends Consts
     static void initAll() throws Exception {
         // reusing tx ids to abort any ongoing transactions
         
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
 
-        producer = new TxProducer(connection, txId2);
+        producer = new TxProducer(getConnection(), txId2);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
@@ -32,7 +32,7 @@ public class TxStreamTest extends Consts
     @Test
     public void testSetGroupStartOffset() throws Exception
     {
-        TxStream stream = new TxStream(connection);
+        TxStream stream = new TxStream(getConnection());
         stream.initProducer(txId1);
         stream.initConsumer(topic1, groupId, true);
         stream.setGroupStartOffset(0);
@@ -42,12 +42,12 @@ public class TxStreamTest extends Consts
     @Test
     public void test() throws Exception
     {
-        var producer = new SimpleProducer(connection);
+        var producer = new SimpleProducer(getConnection());
         long target_offset = producer.send(topic2, "noop-1", "noop");
         producer.close();
         
         Map<Long, TxRecord> input = new HashMap<>(); 
-        TxStream stream = new TxStream(connection);
+        TxStream stream = new TxStream(getConnection());
         stream.initProducer(txId1);
 
         long first_offset = Long.MAX_VALUE;
@@ -67,7 +67,7 @@ public class TxStreamTest extends Consts
         var mapping = stream.process(last_offset, x -> x.toUpperCase(), 1, topic2);
         stream.close();
         
-        var consumer = new TxConsumer(connection, topic2, true);
+        var consumer = new TxConsumer(getConnection(), topic2, true);
         var transformed = consumer.readN(target_offset+1, 3, 1);
 
         for (var target : transformed) {
