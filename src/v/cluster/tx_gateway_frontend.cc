@@ -534,7 +534,7 @@ tx_gateway_frontend::dispatch_init_tm_tx(model::node_id leader, kafka::transacti
           if (r.has_error()) {
               vlog(
                 clusterlog.warn,
-                "got error {} on remote abort tx",
+                "got error {} on remote init tm tx",
                 r.error());
               return init_tm_tx_reply{ .ec = tx_errc::timeout};
           }
@@ -633,29 +633,32 @@ tx_gateway_frontend::do_init_tm_tx(ss::shard_id shard, kafka::transactional_id t
               });   
           } else {
               return _id_allocator_frontend.local().allocate_id(timeout).then([&stm, tx_id](allocate_id_reply pid_reply){
-                  if (pid_reply.ec == errc::success) {
-                      model::producer_identity pid {
-                          .id = pid_reply.id,
-                          .epoch = 0
-                      };
-                      return stm->register_new_producer(tx_id, pid).then([pid](tm_stm::op_status op_status) {
-                          init_tm_tx_reply reply {
-                              .pid = pid
-                          };
-                          if (op_status == tm_stm::op_status::success) {
-                              reply.ec = tx_errc::none;
-                          } else if (op_status == tm_stm::op_status::conflict) {
-                              reply.ec = tx_errc::conflict;
-                          } else {
-                              reply.ec = tx_errc::timeout;
-                          }
-                          return reply;
-                      });
-                  } else {
+                  if (pid_reply.ec != errc::success) {
+                      vlog(clusterlog.warn, "allocate_id failed with {}", pid_reply.ec);
                       return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply {
                         .ec = tx_errc::timeout
                       });
                   }
+                  
+                  model::producer_identity pid {
+                      .id = pid_reply.id,
+                      .epoch = 0
+                  };
+                  return stm->register_new_producer(tx_id, pid).then([pid](tm_stm::op_status op_status) {
+                      init_tm_tx_reply reply {
+                          .pid = pid
+                      };
+                      if (op_status == tm_stm::op_status::success) {
+                          reply.ec = tx_errc::none;
+                      } else if (op_status == tm_stm::op_status::conflict) {
+                          vlog(clusterlog.warn, "can't register new producer status: {}", op_status);
+                          reply.ec = tx_errc::conflict;
+                      } else {
+                          vlog(clusterlog.warn, "can't register new producer status: {}", op_status);
+                          reply.ec = tx_errc::timeout;
+                      }
+                      return reply;
+                  });
               });
           }
       });
