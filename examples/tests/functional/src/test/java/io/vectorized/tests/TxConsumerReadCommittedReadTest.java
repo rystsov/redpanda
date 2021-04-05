@@ -19,12 +19,12 @@ public class TxConsumerReadCommittedReadTest extends Consts
     static void initAll() throws Exception {
         // reusing tx ids to abort any ongoing transactions
         
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
 
-        producer = new TxProducer(connection, txId2);
+        producer = new TxProducer(getConnection(), txId2);
         producer.initTransactions();
         producer.commitTx(topic1, "key1", "value1");
         producer.close();
@@ -34,7 +34,7 @@ public class TxConsumerReadCommittedReadTest extends Consts
     public void fetchReadsComittedTest() throws Exception
     {
         Map<String, Long> offsets = new HashMap<>();
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         long first_offset = producer.commitTx(topic1, "key1", "value1");
         offsets.put("key1", first_offset);
@@ -46,7 +46,7 @@ public class TxConsumerReadCommittedReadTest extends Consts
         offsets.put("key10", last_offset);
         producer.close();
 
-        var consumer = new TxConsumer(connection, topic1, true);
+        var consumer = new TxConsumer(getConnection(), topic1, true);
         consumer.seekToEnd();
         int retries = 8;
         while (last_offset >= consumer.position() && retries > 0) {
@@ -70,14 +70,14 @@ public class TxConsumerReadCommittedReadTest extends Consts
     @Test
     public void fetchDoesntReadAbortedTest() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         long first_offset = producer.commitTx(topic1, "key1", "value1");
         producer.abortTx(topic1, "key2", "value2");
         long last_offset = producer.commitTx(topic1, "key3", "value3");
         producer.close();
 
-        var consumer = new TxConsumer(connection, topic1, true);
+        var consumer = new TxConsumer(getConnection(), topic1, true);
         consumer.seekToEnd();
         int retries = 8;
         while (last_offset >= consumer.position() && retries > 0) {

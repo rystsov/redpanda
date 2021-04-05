@@ -18,11 +18,11 @@ public class TxConsumerReadUncommittedSeekTest extends Consts
     @Test
     public void txlessSeekTest() throws Exception
     {
-        var producer = new SimpleProducer(connection);
+        var producer = new SimpleProducer(getConnection());
         long offset = producer.send(topic1, "key1", "value1");
         producer.close();
 
-        var consumer = new TxConsumer(connection, topic1, false);
+        var consumer = new TxConsumer(getConnection(), topic1, false);
         int retries = 8;
         while (offset >= consumer.position() && retries > 0) {
             // partitions lag behind a coordinator
@@ -39,12 +39,12 @@ public class TxConsumerReadUncommittedSeekTest extends Consts
     @Test
     public void txSeekTest() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         long offset = producer.commitTx(topic1, "key1", "value1");
         producer.close();
 
-        var consumer = new TxConsumer(connection, topic1, false);
+        var consumer = new TxConsumer(getConnection(), topic1, false);
         
         int retries = 8;
         while (offset >= consumer.position() && retries > 0) {
@@ -62,12 +62,12 @@ public class TxConsumerReadUncommittedSeekTest extends Consts
     @Test
     public void seekDoesntRespectOngoingTx() throws Exception
     {
-        var producer = new TxProducer(connection, txId1);
+        var producer = new TxProducer(getConnection(), txId1);
         producer.initTransactions();
         producer.beginTransaction();
         long offset = producer.send(topic1, "key1", "value1");
         
-        var consumer = new TxConsumer(connection, topic1, false);
+        var consumer = new TxConsumer(getConnection(), topic1, false);
         
         int retries = 8;
         while (offset >= consumer.position() && retries > 0) {

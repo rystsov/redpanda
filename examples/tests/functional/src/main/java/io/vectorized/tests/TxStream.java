@@ -56,7 +56,7 @@ public class TxStream
         var isolation = isReadCommittedIsolation ? "read_committed" : "read_uncommitted";
 
         Properties cprops = new Properties();
-        cprops.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
+        cprops.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, connection);
         cprops.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         cprops.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         cprops.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, isolation);
