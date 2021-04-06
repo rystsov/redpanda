@@ -32,6 +32,7 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/coroutine.hh>
 
 #include <absl/container/node_hash_map.h>
 #include <cluster/partition_manager.h>
@@ -142,6 +143,9 @@ public:
 
     ss::future<mark_group_committed_result>
     mark_group_committed(mark_group_committed_request&& request);
+
+    ss::future<cluster::begin_group_tx_reply>
+    begin_tx(cluster::begin_group_tx_request&&);
 
     /// \brief Handle a OffsetFetch request
     ss::future<offset_fetch_response>

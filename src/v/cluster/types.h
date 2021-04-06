@@ -60,6 +60,10 @@ enum class tx_errc {
     conflict,
     fenced,
     stale,
+    not_coordinator,
+    coordinator_not_available,
+    preparing_rebalance,
+    rebalance_in_progress,
 };
 struct tx_errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::tx_errc"; }
@@ -145,6 +149,16 @@ struct abort_tx_request {
     model::timeout_clock::duration timeout;
 };
 struct abort_tx_reply {
+    tx_errc ec;
+};
+struct begin_group_tx_request {
+    model::ntp ntp;
+    kafka::group_id group_id;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+};
+struct begin_group_tx_reply {
+    model::term_id etag;
     tx_errc ec;
 };
 struct commit_group_tx_request {

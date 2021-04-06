@@ -39,6 +39,9 @@ public:
     virtual ss::future<abort_tx_reply>
     abort_tx(abort_tx_request&&, rpc::streaming_context&) final;
 
+    virtual ss::future<begin_group_tx_reply>
+    begin_group_tx(begin_group_tx_request&&, rpc::streaming_context&) final;
+
     virtual ss::future<commit_group_tx_reply>
     commit_group_tx(commit_group_tx_request&&, rpc::streaming_context&) final;
 

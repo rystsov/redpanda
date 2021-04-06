@@ -69,6 +69,33 @@ class group_router final {
           });
     }
 
+    template<typename Request, typename FwdFunc>
+    auto route_tx(Request&& r, FwdFunc func) {
+        // get response type from FwdFunc it has return future<response>.
+        using return_type = std::invoke_result_t<
+          FwdFunc,
+          decltype(std::declval<group_manager>()),
+          Request&&>;
+        using resp_type = typename return_type::value_type;
+
+        auto m = shard_for(r.group_id);
+        if (!m) {
+            resp_type reply;
+            reply.ec = cluster::tx_errc::not_coordinator;
+            return ss::make_ready_future<resp_type>(reply);
+        }
+        r.ntp = std::move(m->first);
+        return with_scheduling_group(
+          _sg, [this, func, shard = m->second, r = std::move(r)]() mutable {
+              return _group_manager.invoke_on(
+                shard,
+                _ssg,
+                [func, r = std::move(r)](group_manager& mgr) mutable {
+                    return std::invoke(func, mgr, std::move(r));
+                });
+          });
+    }
+
 public:
     group_router(
       ss::scheduling_group sched_group,
@@ -106,8 +133,13 @@ public:
         return route(std::move(request), &group_manager::txn_offset_commit);
     }
 
+    // todo rename, get rid of mark_group_committed_request
     auto mark_group_committed(mark_group_committed_request&& request) {
         return route(std::move(request), &group_manager::mark_group_committed);
+    }
+
+    auto begin_tx(cluster::begin_group_tx_request&& request) {
+        return route_tx(std::move(request), &group_manager::begin_tx);
     }
 
     auto offset_fetch(offset_fetch_request&& request) {

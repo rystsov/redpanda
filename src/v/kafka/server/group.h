@@ -428,12 +428,17 @@ public:
 
     ss::future<mark_group_committed_result> mark_committed(mark_group_committed_request&& r);
 
+    ss::future<cluster::begin_group_tx_reply> begin_tx(cluster::begin_group_tx_request&&);
+
     ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
     
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
 
     ss::future<txn_offset_commit_response>
     handle_txn_offset_commit(txn_offset_commit_request&& r);
+
+    ss::future<cluster::begin_group_tx_reply>
+    handle_begin_tx(cluster::begin_group_tx_request&& r);
     
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);

@@ -1243,6 +1243,12 @@ group::mark_committed(mark_group_committed_request&& req) {
     co_return mark_group_committed_result();
 }
 
+ss::future<cluster::begin_group_tx_reply>
+group::begin_tx([[maybe_unused]] cluster::begin_group_tx_request&& r) {
+    cluster::begin_group_tx_reply reply;    
+    co_return reply;
+}
+
 ss::future<txn_offset_commit_response>
 group::store_txn_offsets(txn_offset_commit_request&& req) {
     auto r = std::move(req);
@@ -1410,6 +1416,30 @@ group::handle_txn_offset_commit(txn_offset_commit_request&& r) {
     } else {
         vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
         co_return txn_offset_commit_response(r, error_code::unknown_server_error);
+    }
+}
+
+ss::future<cluster::begin_group_tx_reply>
+group::handle_begin_tx(cluster::begin_group_tx_request&& r) {
+    if (in_state(group_state::dead)) {
+        cluster::begin_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::coordinator_not_available;
+        co_return reply;
+    } else if (in_state(group_state::empty)) {
+        cluster::begin_group_tx_reply reply;
+        co_return reply;
+    } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        cluster::begin_group_tx_reply reply;
+        co_return reply;
+    } else if (in_state(group_state::completing_rebalance)) {
+        cluster::begin_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::rebalance_in_progress;
+        co_return reply;
+    } else {
+        vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
+        cluster::begin_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::timeout;
+        co_return reply;
     }
 }
 

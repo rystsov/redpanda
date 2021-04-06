@@ -646,6 +646,34 @@ group_manager::mark_group_committed(mark_group_committed_request&& r) {
     co_return co_await group->handle_mark_group_committed(std::move(r));
 }
 
+ss::future<cluster::begin_group_tx_reply>
+group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
+    auto error = validate_group_status(
+      r.ntp, r.group_id, offset_commit_api::key);
+    if (error != error_code::none) {
+        cluster::begin_group_tx_reply reply;
+        if (error == error_code::not_coordinator) {
+            reply.ec = cluster::tx_errc::not_coordinator;
+        } else {
+            reply.ec = cluster::tx_errc::timeout;
+        }
+        co_return reply;
+    }
+
+    auto group = get_group(r.group_id);
+    if (!group) {
+        // <kafka>the group is not relying on Kafka for group management, so
+        // allow the commit</kafka>
+        auto p = _partitions.find(r.ntp)->second->partition;
+        group = ss::make_lw_shared<kafka::group>(
+          r.group_id, group_state::empty, _conf, p);
+        _groups.emplace(r.group_id, group);
+        _groups.rehash(0);
+    }
+
+    co_return co_await group->handle_begin_tx(std::move(r));
+}
+
 ss::future<offset_commit_response>
 group_manager::offset_commit(offset_commit_request&& r) {
     auto error = validate_group_status(
