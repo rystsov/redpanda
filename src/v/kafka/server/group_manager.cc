@@ -267,99 +267,44 @@ ss::future<> group_manager::handle_partition_leader_change(
  */
 ss::future<> group_manager::recover_partition(
   ss::lw_shared_ptr<cluster::partition> p, recovery_batch_consumer_state ctx) {
-    /*
-     * [group-id -> [topic-partition -> offset-metadata]]
-     */
-    using offset_map_type = absl::flat_hash_map<
-      kafka::group_id,
-      absl::flat_hash_map<
-        model::topic_partition,
-        std::pair<model::offset, group_log_offset_metadata>>>;
+    
+    for (auto& [group_id, group_stm] : ctx.groups) {
+        if (group_stm.has_data()) {
+            auto group = get_group(group_id);
+            if (!group) {
+                group = ss::make_lw_shared<kafka::group>(group_id, group_state::empty, _conf, p);
+            }
+            _groups.emplace(group_id, group);
+            
+            for (auto& [key, meta] : group_stm._offsets) {
+                model::topic_partition tp(key.topic, key.partition);
 
-    /*
-     * build a mapping from group-id to (tp, offset) pairs where the latest
-     * entries take precedence.
-     */
-    offset_map_type group_offsets;
-    offset_map_type empty_group_offsets;
-
-    for (auto& e : ctx.loaded_offsets) {
-        model::topic_partition tp(e.first.topic, e.first.partition);
-        if (ctx.loaded_groups.contains(e.first.group)) {
-            group_offsets[e.first.group][tp] = e.second;
-        } else {
-            empty_group_offsets[e.first.group][tp] = e.second;
+                group->try_upsert_offset(
+                  tp,
+                  group::offset_metadata{
+                    meta.first,
+                    meta.second.offset,
+                    meta.second.metadata.value_or(""),
+                  });
+            }
         }
     }
-
-    for (auto& e : ctx.loaded_groups) {
-        offset_map_type::mapped_type offsets; // default empty if not found
-        if (auto it = group_offsets.find(e.first); it != group_offsets.end()) {
-            offsets = it->second;
-        }
-
-        auto group = get_group(e.first);
-        if (group) {
-            klog.debug("group already exists {}", e.first);
-            continue;
-        }
-
-        group = ss::make_lw_shared<kafka::group>(e.first, e.second, _conf, p);
-
-        for (auto& e : offsets) {
-            group->insert_offset(
-              e.first,
-              group::offset_metadata{
-                e.second.first,
-                e.second.second.offset,
-                e.second.second.metadata.value_or(""),
-              });
-        }
-
-        _groups.emplace(e.first, group);
-        group->reschedule_all_member_heartbeats();
-    }
-
-    for (auto& e : empty_group_offsets) {
-        auto group = get_group(e.first);
-        if (group) {
-            klog.debug("group already exists {}", e.first);
-            continue;
-        }
-
-        group = ss::make_lw_shared<kafka::group>(
-          e.first, group_state::empty, _conf, p);
-
-        for (auto& e : e.second) {
-            group->insert_offset(
-              e.first,
-              group::offset_metadata{
-                e.second.first,
-                e.second.second.offset,
-                e.second.second.metadata.value_or(""),
-              });
-        }
-
-        _groups.emplace(e.first, group);
-        group->reschedule_all_member_heartbeats();
-    }
-
-    _groups.rehash(0);
-
+    
     /*
      * <kafka>if the cache already contains a group which should be removed,
      * raise an error. Note that it is possible (however unlikely) for a
      * consumer group to be removed, and then to be used only for offset storage
      * (i.e. by "simple" consumers)</kafka>
      */
-    for (auto& group_id : ctx.removed_groups) {
-        if (
-          _groups.contains(group_id)
-          && !empty_group_offsets.contains(group_id)) {
-            return ss::make_exception_future<>(
-              std::runtime_error("unexpected unload of active group"));
+    for (auto& [group_id, group_stm] : ctx.groups) {
+        if (group_stm.is_removed()) {
+            if (_groups.contains(group_id) && group_stm._offsets.size() > 0) {
+                return ss::make_exception_future<>(std::runtime_error("unexpected unload of active group"));
+            }
         }
     }
+
+    _groups.rehash(0);
 
     return ss::make_ready_future<>();
 }
@@ -414,17 +359,19 @@ ss::future<> recovery_batch_consumer::handle_group_metadata(
 
     vlog(klog.trace, "Recovering group metadata {}", group_id);
 
-    if (!val_buf) {
-        // tombstone
-        st.loaded_groups.erase(group_id);
-        st.removed_groups.emplace(group_id);
-    } else {
-        auto metadata = reflection::from_iobuf<group_log_group_metadata>(
-          std::move(*val_buf));
-        st.removed_groups.erase(group_id);
+    if (val_buf) {
         // until we switch over to a compacted topic or use raft snapshots,
         // always take the latest entry in the log.
-        st.loaded_groups[group_id] = std::move(metadata);
+
+        auto metadata = reflection::from_iobuf<group_log_group_metadata>(
+          std::move(*val_buf));
+
+        auto [group_it, _] = st.groups.try_emplace(group_id, group_stm());
+        group_it->second.overwrite_metadata(std::move(metadata));
+    } else {
+        // tombstone
+        auto [group_it, _] = st.groups.try_emplace(group_id, group_stm());
+        group_it->second.remove();
     }
 
     return ss::make_ready_future<>();
@@ -434,18 +381,21 @@ ss::future<> recovery_batch_consumer::handle_offset_metadata(
   iobuf key_buf, std::optional<iobuf> val_buf) {
     auto key = reflection::from_iobuf<group_log_offset_key>(std::move(key_buf));
 
-    if (!val_buf) {
-        // tombstone
-        st.loaded_offsets.erase(key);
-    } else {
+    if (val_buf) {
         auto metadata = reflection::from_iobuf<group_log_offset_metadata>(
           std::move(*val_buf));
         vlog(
           klog.trace, "Recovering offset {} with metadata {}", key, metadata);
         // until we switch over to a compacted topic or use raft snapshots,
         // always take the latest entry in the log.
-        st.loaded_offsets[key] = std::make_pair(
-          batch_base_offset, std::move(metadata));
+        auto [group_it, _] = st.groups.try_emplace(key.group, group_stm());
+        group_it->second.update_offset(key, batch_base_offset, std::move(metadata));
+    } else {
+        // tombstone
+        auto group_it = st.groups.find(key.group);
+        if (group_it != st.groups.end()) {
+            group_it->second.remove_offset(key);
+        }
     }
 
     return ss::make_ready_future<>();
@@ -781,22 +731,6 @@ error_code group_manager::validate_group_status(
 
     klog.trace("group operation misdirected {}/{}", group, ntp);
     return error_code::not_coordinator;
-}
-
-std::ostream& operator<<(std::ostream& os, const group_log_offset_key& key) {
-    fmt::print(
-      os,
-      "group {} topic {} partition {}",
-      key.group(),
-      key.topic(),
-      key.partition());
-    return os;
-}
-
-std::ostream&
-operator<<(std::ostream& os, const group_log_offset_metadata& md) {
-    fmt::print(os, "offset {}", md.offset());
-    return os;
 }
 
 } // namespace kafka
