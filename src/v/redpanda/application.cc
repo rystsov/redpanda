@@ -775,7 +775,7 @@ void application::start_redpanda() {
             id_allocator_frontend,
             controller->get_credential_store(),
             controller->get_authorizer(),
-            controller->get_security_frontend());
+            controller->get_security_frontend(),
             tx_gateway_frontend);
           s.set_protocol(std::move(proto));
       })
