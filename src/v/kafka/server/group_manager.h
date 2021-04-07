@@ -179,6 +179,48 @@ private:
           , partition(std::move(p)) {}
     };
 
+    struct read_write_lw_lock {
+        int16_t num_readers {0};
+        int16_t num_writers {0};
+        std::stack<ss::lw_shared_ptr<ss::promise<>>> pending_writers;
+
+        ss::future<> take_writer_lock() {
+            num_writers++;
+            if (num_readers==0) {
+                return ss::make_ready_future<>();
+            };
+            auto when_taken = ss::make_lw_shared<ss::promise<>>();
+            pending_writers.push(when_taken);
+            return when_taken->get_future();
+        }
+
+        void release_writer_lock() {
+            num_writers--;
+            if (pending_writers.size() > 0) {
+                auto pending_writer = pending_writers.top();
+                pending_writers.pop();
+                pending_writer->set_value();
+            }
+        }
+        
+        bool take_reader_lock() {
+            if (num_writers > 0) {
+                return false;
+            }
+            num_readers++;
+            return true;
+        }
+
+        void release_reader_lock() {
+            num_readers--;
+            if (num_readers == 0 && pending_writers.size() > 0) {
+                auto pending_writer = pending_writers.top();
+                pending_writers.pop();
+                pending_writer->set_value();
+            }
+        }
+    };
+
     absl::node_hash_map<model::ntp, ss::lw_shared_ptr<attached_partition>>
       _partitions;
 
@@ -210,6 +252,7 @@ private:
     config::configuration& _conf;
     absl::node_hash_map<group_id, group_ptr> _groups;
     model::broker _self;
+    read_write_lw_lock _catchup_lock;
 };
 
 /**

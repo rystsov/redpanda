@@ -222,38 +222,41 @@ ss::future<> group_manager::handle_partition_leader_change(
          * we just became leader. make sure the log is up-to-date. see
          * struct group_log_record_key{} for more details.
          */
-        return inject_noop(p->partition, timeout).then([this, timeout, p] {
-            /*
-             * the full log is read and deduplicated. the dedupe processing is
-             * based on the record keys, so this code should be ready to
-             * transparently take advantage of key-based compaction in the
-             * future.
-             */
-            storage::log_reader_config reader_config(
-              p->partition->start_offset(),
-              model::model_limits<model::offset>::max(),
-              0,
-              std::numeric_limits<size_t>::max(),
-              kafka_read_priority(),
-              raft::data_batch_type,
-              std::nullopt,
-              std::nullopt);
 
-            return p->partition->make_reader(reader_config)
-              .then([this, p, timeout](model::record_batch_reader reader) {
-                  return std::move(reader)
-                    .consume(recovery_batch_consumer(p->as), timeout)
-                    .then([this, p](recovery_batch_consumer_state state) {
-                        // avoid trying to recover if we stopped the reader
-                        // because an abort was requested
-                        if (p->as.abort_requested()) {
-                            return ss::make_ready_future<>();
-                        }
-                        return recover_partition(p->partition, std::move(state))
-                          .then([p] { p->loading = false; });
-                    });
-              });
-        });
+        return _catchup_lock.take_writer_lock().then([this, timeout, p] { 
+            return inject_noop(p->partition, timeout).then([this, timeout, p] {
+                /*
+                 * the full log is read and deduplicated. the dedupe processing is
+                 * based on the record keys, so this code should be ready to
+                 * transparently take advantage of key-based compaction in the
+                 * future.
+                 */
+                storage::log_reader_config reader_config(
+                  p->partition->start_offset(),
+                  model::model_limits<model::offset>::max(),
+                  0,
+                  std::numeric_limits<size_t>::max(),
+                  kafka_read_priority(),
+                  raft::data_batch_type,
+                  std::nullopt,
+                  std::nullopt);
+
+              return p->partition->make_reader(reader_config)
+                .then([this, p, timeout](model::record_batch_reader reader) {
+                    return std::move(reader)
+                      .consume(recovery_batch_consumer(p->as), timeout)
+                      .then([this, p](recovery_batch_consumer_state state) {
+                          // avoid trying to recover if we stopped the reader
+                          // because an abort was requested
+                          if (p->as.abort_requested()) {
+                              return ss::make_ready_future<>();
+                          }
+                          return recover_partition(p->partition, std::move(state))
+                            .then([p] { p->loading = false; });
+                      });
+                });
+            });
+        }).finally([this] { _catchup_lock.release_writer_lock(); });
     } else {
         // TODO: we are not yet handling group / partition deletion
         return ss::make_ready_future<>();
