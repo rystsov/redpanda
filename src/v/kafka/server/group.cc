@@ -1242,15 +1242,126 @@ group::mark_committed(mark_group_committed_request&& req) {
 
     co_return mark_group_committed_result();
 }
+// group::reset_state(term):
+//  term = $term
+//  state.ongoing = {}
+//  state.fenced = {}
+//  state.prepared = {}
+//  state.expecting = {}
 
 ss::future<cluster::begin_group_tx_reply>
 group::begin_tx([[maybe_unused]] cluster::begin_group_tx_request&& r) {
+    // if term < consensus.term:
+    //   group_manager::handle_partition_leader_change is about to replace state
+    //   reply timeout
+    // if consensus.term <  term:
+    //   vassert(false) // consensus.term can't go back
+    // if req.pid.epoch < state.fenced[req.pid.id].epoch
+    //   reply fenced
+    // if req.pid.epoch <= state.ongoing[req.pid.id].pid.epoch:
+    //   client will bump epoch and get another greater that ongoing
+    //   reply fenced
+    // if req.pid in state.expecting:
+    //   // TODO: add GC
+    //   reply fenced
+    // if state.ongoing[req.pid.id].pid.epoch < req.pid.epoch:
+    //   // very rare situation, coordinator usually aborts or commits
+    //   // it may happen only when a coordinator reboots
+    //   // before persisting started tx
+    //   // => tx isn't committed and can't be comitted
+    //   delete state.ongoing[req.pid.id]
+    //   state.ongoing[req.pid.id] = { pid: req.pid, commits: {} }
+    // if state.fenced[req.pid.id].epoch < req.pid.epoch:
+    //   // happen only when new tx starts => not ofter
+    //   // it's ok to hold the mutex
+    //   consesnsus.replicate(if term, "fenced(req.pid)"):
+    //     if ok:
+    //       state.fenced[req.pid.id].epoch = req.pid.epoch
+    //     else reply timeout
+    // state.expecting[req.pid] = term
+    // reply term
     cluster::begin_group_tx_reply reply;    
     co_return reply;
 }
 
+// store_txn_offsets + PREPARE
 ss::future<txn_offset_commit_response>
 group::store_txn_offsets(txn_offset_commit_request&& req) {
+    // if $pid in state.aborting:
+    //   $mutex.release
+    //   reply error
+    // if req.pid not in state.expecting:
+    //   reply timeout // client error
+    // if term < consensus.term:
+    //   group_manager::handle_partition_leader_change is about to replace state
+    //   reply timeout
+    // if consensus.term <  term:
+    //   vassert(false) // consensus.term can't go back
+    // if pid.id in state.fenced 
+    //   if pid.epoch < state.fenced[pid.id].epoch
+    //     reply fenced
+    //   if state.fenced[pid.id].epoch < pid.epoch
+    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
+    //                 // and in the begin bump fence
+    // else:
+    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
+    // if req.pid.id not in state.ongoing:
+    //   reply error // log vlog.error not fatal bug
+    // if state.ongoing[req.pid.id].epoch != req.pid.epoch:
+    //   reply error // log vlog.error not fatal bug
+    // state.ongoing[req.pid.id].offsets[req.tp]=req.offset
+    // return ok
+    
+    // PREPARE: follow up code becomes prepare($mutex, $term, $pid)
+
+    // if $pid in state.aborting:
+    //   $mutex.release
+    //   reply error
+    // if state.prepared[$pid]:
+    //   $mutex.release
+    //   reply ok
+    // if term < consensus.term:
+    //   group_manager::handle_partition_leader_change is about to replace state
+    //   $mutex.release
+    //   reply timeout
+    // if consensus.term <  term:
+    //   vassert(false) // consensus.term can't go back
+    // if pid.id in state.fenced 
+    //   if pid.epoch < state.fenced[pid.id].epoch
+    //     $mutex.release
+    //     reply fenced
+    //   if state.fenced[pid.id].epoch < pid.epoch
+    //     $mutex.release
+    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
+    //                 // and in the begin bump fence
+    // else:
+    //   $mutex.release
+    //   reply error
+    // if $term < term:
+    //   $mutex.release
+    //   reply fenced // rebooted since tx start
+    // tx = state.ongoing[$pid.id]
+    // if tx.epoch != $pid.epoch:
+    //   $mutex.release
+    //   reply error // log vlog.error not fatal bug
+    // delete state.expecting[$pid] // failing send
+    // release mutex
+    // r = replicate(if $term, prepared(pid, tx.offsets))
+    // if ok:
+    //   if term!=$term or consensus.term != $term
+    //     reply ok
+    //   if state.prepared[$pid]:
+    //     reply ok
+    //   if ongoing:
+    //     offsets += tx.offsets
+    //     state.prepared[$pid]=true
+    //     delete state.ongoing
+    //   if state.aborted[pid] || state.aborting[pid]:
+    //     reply timeout
+    //   reply ok
+    // else:
+    //   reply timeout
+    
     auto r = std::move(req);
     model::producer_identity pid {
         .id = r.data.producer_id,
@@ -1319,6 +1430,21 @@ group::store_txn_offsets(txn_offset_commit_request&& req) {
 
     co_return txn_offset_commit_response(r, error_code::none);
 }
+
+// abort($mutex, $pid, $tx_seq):
+//   if state.aborted[$pid] => ok
+//   must be prepared or ongoing
+//   state.aborting[$pid] = true
+//   $mutex.release
+//   replicate(term, aborted($pid))
+//   if ok and $pid in state.aborting:
+//     state.aborted[$pid]=true
+//     delete.ongoing[$pid]
+//     delete.exteced[$pid]
+//     delete.prepared[$pid]
+//     delete state.aborting[$pid]
+//     reply ok
+//   reply timeout
 
 ss::future<offset_commit_response>
 group::store_offsets(offset_commit_request&& r) {
@@ -1408,8 +1534,10 @@ group::handle_txn_offset_commit(txn_offset_commit_request&& r) {
         co_return txn_offset_commit_response(r, error_code::coordinator_not_available);
     } else if (in_state(group_state::empty)) {
         // <kafka>The group is only using Kafka to store offsets.</kafka>
+        // pass term
         co_return co_await store_txn_offsets(std::move(r));
     } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        // pass term
         co_return co_await store_txn_offsets(std::move(r));
     } else if (in_state(group_state::completing_rebalance)) {
         co_return txn_offset_commit_response(r, error_code::rebalance_in_progress);

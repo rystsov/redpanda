@@ -222,7 +222,9 @@ ss::future<> group_manager::handle_partition_leader_change(
          * we just became leader. make sure the log is up-to-date. see
          * struct group_log_record_key{} for more details.
          */
-
+        // save term
+        // take a mutex
+        // TODO: instead of the read only delta
         return _catchup_lock.take_writer_lock().then([this, timeout, p] { 
             return inject_noop(p->partition, timeout).then([this, timeout, p] {
                 /*
@@ -235,6 +237,7 @@ ss::future<> group_manager::handle_partition_leader_change(
                   p->partition->start_offset(),
                   model::model_limits<model::offset>::max(),
                   0,
+                  // TODO: read up to noop's offset
                   std::numeric_limits<size_t>::max(),
                   kafka_read_priority(),
                   std::nullopt,
@@ -254,6 +257,8 @@ ss::future<> group_manager::handle_partition_leader_change(
                           return recover_partition(p->partition, std::move(state))
                             .then([p] { p->loading = false; });
                       });
+                      // set last term = term
+                      // then release mutex
                 });
             });
         }).finally([this] { _catchup_lock.release_writer_lock(); });
@@ -270,6 +275,7 @@ ss::future<> group_manager::handle_partition_leader_change(
  */
 ss::future<> group_manager::recover_partition(
   ss::lw_shared_ptr<cluster::partition> p, recovery_batch_consumer_state ctx) {
+    // group.reset_state(term)
     for (auto& [group_id, group_stm] : ctx.groups) {
         if (group_stm.has_data()) {
             auto group = get_group(group_id);
@@ -610,6 +616,7 @@ group_manager::leave_group(leave_group_request&& r) {
 
 ss::future<txn_offset_commit_response>
 group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
+    // wrap in take mutex, most time handle_txn_offset_commit is in memory
     auto error = validate_group_status(
       r.ntp, r.data.group_id, offset_commit_api::key);
     if (error != error_code::none) {
@@ -626,7 +633,8 @@ group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
         _groups.emplace(r.data.group_id, group);
         _groups.rehash(0);
     }
-
+    
+    // pass last term
     co_return co_await group->handle_txn_offset_commit(std::move(r));
 }
 
@@ -648,6 +656,7 @@ group_manager::mark_group_committed(mark_group_committed_request&& r) {
 
 ss::future<cluster::begin_group_tx_reply>
 group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
+    // wrap in take mutex, most time begin_tx is in memory
     auto error = validate_group_status(
       r.ntp, r.group_id, offset_commit_api::key);
     if (error != error_code::none) {
@@ -671,6 +680,7 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
         _groups.rehash(0);
     }
 
+    // pass last term
     co_return co_await group->handle_begin_tx(std::move(r));
 }
 
