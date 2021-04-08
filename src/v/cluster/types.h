@@ -64,6 +64,7 @@ enum class tx_errc {
     coordinator_not_available,
     preparing_rebalance,
     rebalance_in_progress,
+    coordinator_load_in_progress
 };
 struct tx_errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::tx_errc"; }

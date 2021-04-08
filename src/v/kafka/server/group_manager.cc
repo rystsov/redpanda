@@ -376,7 +376,7 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
         auto version = model::control_record_version(buf_reader.read_int16());
 
         const auto& hdr = batch.header();
-        [[maybe_unused]] auto bid = model::batch_identity::from(hdr);
+        auto bid = model::batch_identity::from(hdr);
 
         vassert(
           version == group::commit_tx_record_version,
@@ -656,32 +656,45 @@ group_manager::mark_group_committed(mark_group_committed_request&& r) {
 
 ss::future<cluster::begin_group_tx_reply>
 group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
-    // wrap in take mutex, most time begin_tx is in memory
-    auto error = validate_group_status(
-      r.ntp, r.group_id, offset_commit_api::key);
-    if (error != error_code::none) {
+    if (!_catchup_lock.take_reader_lock()) {
         cluster::begin_group_tx_reply reply;
-        if (error == error_code::not_coordinator) {
-            reply.ec = cluster::tx_errc::not_coordinator;
-        } else {
-            reply.ec = cluster::tx_errc::timeout;
-        }
+        reply.ec = cluster::tx_errc::coordinator_load_in_progress;
         co_return reply;
     }
 
-    auto group = get_group(r.group_id);
-    if (!group) {
-        // <kafka>the group is not relying on Kafka for group management, so
-        // allow the commit</kafka>
-        auto p = _partitions.find(r.ntp)->second->partition;
-        group = ss::make_lw_shared<kafka::group>(
-          r.group_id, group_state::empty, _conf, p);
-        _groups.emplace(r.group_id, group);
-        _groups.rehash(0);
-    }
+    try {
+        // wrap in take mutex, most time begin_tx is in memory
+        auto error = validate_group_status(
+          r.ntp, r.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            cluster::begin_group_tx_reply reply;
+            if (error == error_code::not_coordinator) {
+                reply.ec = cluster::tx_errc::not_coordinator;
+            } else {
+                reply.ec = cluster::tx_errc::timeout;
+            }
+            co_return reply;
+        }
 
-    // pass last term
-    co_return co_await group->handle_begin_tx(std::move(r));
+        auto group = get_group(r.group_id);
+        if (!group) {
+            // <kafka>the group is not relying on Kafka for group management, so
+            // allow the commit</kafka>
+            auto p = _partitions.find(r.ntp)->second->partition;
+            group = ss::make_lw_shared<kafka::group>(
+              r.group_id, group_state::empty, _conf, p);
+            _groups.emplace(r.group_id, group);
+            _groups.rehash(0);
+        }
+
+        // pass last term
+        auto reply = co_await group->handle_begin_tx(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
+    }
 }
 
 ss::future<offset_commit_response>

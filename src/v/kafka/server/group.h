@@ -127,6 +127,7 @@ public:
 
     static constexpr model::control_record_version inflight_tx_record_version{0};
     static constexpr model::control_record_version commit_tx_record_version{0};
+    static constexpr model::control_record_version fence_control_record_version{0};
 
     struct offset_metadata {
         model::offset log_offset;

@@ -1280,7 +1280,31 @@ group::begin_tx([[maybe_unused]] cluster::begin_group_tx_request&& r) {
     //     else reply timeout
     // state.expecting[req.pid] = term
     // reply term
-    cluster::begin_group_tx_reply reply;    
+
+    iobuf key;
+    kafka::response_writer w(key);
+    w.write(group::fence_control_record_version());
+
+    storage::record_batch_builder builder(cluster::tx_fence_batch_type, model::offset(0));
+    builder.set_producer_identity(r.pid.id, r.pid.epoch);
+    builder.set_control_type();
+    builder.add_raw_kw(
+      std::move(key), std::nullopt, std::vector<model::record_header>());
+
+    auto batch = std::move(builder).build();
+
+    auto reader = model::make_memory_record_batch_reader(std::move(batch));
+
+    auto e = co_await _partition->replicate(std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
+
+    if (!e) {
+        cluster::begin_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::timeout;
+        co_return reply;
+    }
+
+    cluster::begin_group_tx_reply reply;
+    // TODO add term
     co_return reply;
 }
 
@@ -1554,11 +1578,9 @@ group::handle_begin_tx(cluster::begin_group_tx_request&& r) {
         reply.ec = cluster::tx_errc::coordinator_not_available;
         co_return reply;
     } else if (in_state(group_state::empty)) {
-        cluster::begin_group_tx_reply reply;
-        co_return reply;
+        co_return co_await begin_tx(std::move(r));
     } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
-        cluster::begin_group_tx_reply reply;
-        co_return reply;
+        co_return co_await begin_tx(std::move(r));
     } else if (in_state(group_state::completing_rebalance)) {
         cluster::begin_group_tx_reply reply;
         reply.ec = cluster::tx_errc::rebalance_in_progress;
