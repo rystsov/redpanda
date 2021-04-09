@@ -44,7 +44,9 @@ tx_gateway_frontend::tx_gateway_frontend(
     , _controller(controller)
     , _id_allocator_frontend(id_allocator_frontend)
     , _coordinator_mapper(coordinator_mapper)
-    , _group_router(group_router) {}
+    , _group_router(group_router)
+    , _metadata_dissemination_retries(config::shard_local_cfg().metadata_dissemination_retries.value())
+    , _metadata_dissemination_retry_delay_ms(config::shard_local_cfg().metadata_dissemination_retry_delay_ms.value()) {}
 
 ss::future<std::optional<model::node_id>>
 tx_gateway_frontend::get_tx_broker([[maybe_unused]] ss::sstring key) {
@@ -180,6 +182,113 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
               };
           });
       });
+}
+
+ss::future<begin_group_tx_reply>
+tx_gateway_frontend::begin_group_tx(kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
+    if (!ntp_opt) {
+        vlog(clusterlog.warn, "can't find ntp for {}, creating a consumer group topic", group_id);
+        auto has_created = co_await try_create_consumer_group_topic();
+        if (!has_created) {
+            vlog(clusterlog.warn, "can't create consumer group topic", group_id);
+            co_return begin_group_tx_reply {
+                .ec = tx_errc::partition_not_exists
+            };
+        }
+        
+        ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
+        auto retries = _metadata_dissemination_retries;
+        auto delay_ms = _metadata_dissemination_retry_delay_ms;
+        while (!ntp_opt && 0 < retries--) {
+            co_await ss::sleep(delay_ms);
+            ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
+        }
+        if (!ntp_opt) {
+            vlog(clusterlog.warn, "can't find ntp for {} after {} retries", group_id, _metadata_dissemination_retries);
+            co_return begin_group_tx_reply {
+                .ec = tx_errc::partition_not_exists
+            };
+        }
+    }
+    auto ntp = ntp_opt.value();
+
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        vlog(clusterlog.info, "can' find meta info for {}", ntp);
+        co_return begin_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+
+    auto leader_opt = _leaders.local().get_leader(ntp);
+    if (!leader_opt) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        co_return begin_group_tx_reply {
+            .ec = tx_errc::leader_not_found
+        };
+    }
+    auto leader = leader_opt.value();
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        co_return co_await do_begin_group_tx(group_id, pid, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching begin group tx to {} from {}", leader, _self);
+    co_return co_await dispatch_begin_group_tx(leader, group_id, pid, timeout);
+}
+
+ss::future<begin_group_tx_reply>
+tx_gateway_frontend::dispatch_begin_group_tx(model::node_id leader, kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [group_id, pid, timeout](tx_gateway_client_protocol cp) {
+            return cp.begin_group_tx(
+              begin_group_tx_request{
+                  .group_id = group_id,
+                  .pid = pid,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<begin_group_tx_reply>)
+      .then([](result<begin_group_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote begin group tx",
+                r.error());
+              return begin_group_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<begin_group_tx_reply>
+tx_gateway_frontend::do_begin_group_tx(kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    begin_group_tx_request req;
+    req.group_id = group_id;
+    req.pid = pid;
+    req.timeout = timeout;
+
+    auto reply = co_await _group_router.local().begin_tx(std::move(req));
+
+    if (reply.ec == tx_errc::not_coordinator) {
+        auto retries = _metadata_dissemination_retries;
+        auto delay_ms = _metadata_dissemination_retry_delay_ms;
+        while (reply.ec == tx_errc::not_coordinator && 0 < retries--) {
+            co_await ss::sleep(delay_ms);
+            reply = co_await _group_router.local().begin_tx(std::move(req));
+        }
+    }
+
+    co_return reply;
 }
 
 ss::future<commit_group_tx_reply>
@@ -750,8 +859,8 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
     tx = changed_tx.value();
 
     std::vector<ss::future<commit_group_tx_reply>> gfs;
-    for (auto group_id : tx.groups) {
-        gfs.push_back(commit_group_tx(group_id, tx.pid, tx.tx_seq, timeout));
+    for (auto group : tx.groups) {
+        gfs.push_back(commit_group_tx(group.group_id, tx.pid, tx.tx_seq, timeout));
     }
     std::vector<ss::future<commit_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
@@ -780,8 +889,8 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
 ss::future<checked<tm_transaction, tx_errc>>
 tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, model::timeout_clock::duration timeout) {
     std::vector<ss::future<commit_group_tx_reply>> gfs;
-    for (auto group_id : tx.groups) {
-        gfs.push_back(commit_group_tx(group_id, tx.pid, tx.tx_seq, timeout));
+    for (auto group : tx.groups) {
+        gfs.push_back(commit_group_tx(group.group_id, tx.pid, tx.tx_seq, timeout));
     }
     std::vector<ss::future<commit_tx_reply>> cfs;
     for (auto rm : tx.partitions) {
@@ -1072,29 +1181,32 @@ tx_gateway_frontend::add_offsets_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add_o
         .epoch = request.producer_epoch
     };
 
-    auto f = get_tx(stm, pid, request.transactional_id, timeout);
-
-    // this, pid, request, timeout, &stm
-    return f.then([&stm, request](checked<tm_transaction, tx_errc> r){
-        if (!r.has_value()) {
-            return kafka::add_offsets_to_txn_response_data {
-                .error_code = kafka::error_code::unknown_server_error
-            };
-        }
-
-        auto tx = r.value();
-        auto has_added = stm->add_group(tx.id, tx.etag, request.group_id);
-
-        if (!has_added) {
-            return kafka::add_offsets_to_txn_response_data {
-                .error_code = kafka::error_code::unknown_server_error
-            };
-        }
-
-        return kafka::add_offsets_to_txn_response_data {
-            .error_code = kafka::error_code::none
+    auto tx_opt = co_await get_tx(stm, pid, request.transactional_id, timeout);
+    if (!tx_opt.has_value()) {
+        co_return kafka::add_offsets_to_txn_response_data {
+            .error_code = kafka::error_code::unknown_server_error
         };
-    });
+    }
+
+    auto group_info = co_await begin_group_tx(request.group_id, pid, timeout);
+    if (group_info.ec != tx_errc::none) {
+        vlog(clusterlog.warn, "error on begining group tx: {}", group_info.ec);
+        co_return kafka::add_offsets_to_txn_response_data {
+            .error_code = kafka::error_code::unknown_server_error
+        };
+    }
+    
+    auto tx = tx_opt.value();
+    auto has_added = stm->add_group(tx.id, tx.etag, request.group_id, group_info.etag);
+    if (!has_added) {
+        vlog(clusterlog.warn, "can't add group to tm_stm");
+        co_return kafka::add_offsets_to_txn_response_data {
+            .error_code = kafka::error_code::unknown_server_error
+        };
+    }
+    co_return kafka::add_offsets_to_txn_response_data {
+        .error_code = kafka::error_code::none
+    };
 }
 
 ss::future<begin_tx_reply>
@@ -1299,14 +1411,14 @@ tx_gateway_frontend::end_txn(kafka::end_txn_request_data request, model::timeout
 }
 
 ss::future<bool>
-tx_gateway_frontend::try_create_tx_topic() {
+tx_gateway_frontend::try_create_consumer_group_topic() {
     cluster::topic_configuration topic{
-      model::kafka_internal_namespace,
-      model::kafka_tx_topic,
-      1,
-      config::shard_local_cfg().default_topic_replication()};
+    _coordinator_mapper.local().ns(),
+    _coordinator_mapper.local().topic(),
+    config::shard_local_cfg().group_topic_partitions(),
+    config::shard_local_cfg().default_topic_replication()};
 
-    topic.properties.cleanup_policy_bitflags = model::cleanup_policy_bitflags::deletion;
+    topic.properties.cleanup_policy_bitflags = model::cleanup_policy_bitflags::compaction;
 
     return _controller->get_topics_frontend()
       .local()
@@ -1320,7 +1432,34 @@ tx_gateway_frontend::try_create_tx_topic() {
           return true;
       })
       .handle_exception([](std::exception_ptr e) {
-          vlog(clusterlog.warn, "cant create allocate id stm topic {}", e);
+          vlog(clusterlog.warn, "cant create consumer group topic {}", e);
+          return false;
+      });
+}
+
+ss::future<bool>
+tx_gateway_frontend::try_create_tx_topic() {
+    cluster::topic_configuration topic{
+      model::kafka_internal_namespace,
+      model::kafka_tx_topic,
+      1,
+      config::shard_local_cfg().default_topic_replication()};
+
+    topic.properties.cleanup_policy_bitflags = model::cleanup_policy_bitflags::none;
+
+    return _controller->get_topics_frontend()
+      .local()
+      .autocreate_topics(
+        {std::move(topic)}, config::shard_local_cfg().create_topic_timeout_ms())
+      .then([](std::vector<cluster::topic_result> res) {
+          vassert(res.size() == 1, "expected exactly one result");
+          if (res[0].ec != cluster::errc::success) {
+              return false;
+          }
+          return true;
+      })
+      .handle_exception([](std::exception_ptr e) {
+          vlog(clusterlog.warn, "cant create tx id stm topic {}", e);
           return false;
       });
 }

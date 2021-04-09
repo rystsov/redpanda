@@ -157,6 +157,7 @@ struct begin_group_tx_request {
     kafka::group_id group_id;
     model::producer_identity pid;
     model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
 };
 struct begin_group_tx_reply {
     model::term_id etag;

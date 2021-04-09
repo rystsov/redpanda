@@ -53,9 +53,8 @@ tx_gateway::abort_tx(abort_tx_request&& request, rpc::streaming_context&) {
 }
 
 ss::future<begin_group_tx_reply>
-tx_gateway::begin_group_tx([[maybe_unused]] begin_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
-    co_return begin_group_tx_reply();
-    //return _tx_gateway_frontend.local().do_commit_group_tx(request.group_id, request.pid, request.tx_seq, request.timeout);
+tx_gateway::begin_group_tx(begin_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_begin_group_tx(request.group_id, request.pid, request.timeout);
 };
 
 ss::future<commit_group_tx_reply>

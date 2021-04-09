@@ -285,7 +285,8 @@ bool tm_stm::add_partitions(
 bool tm_stm::add_group(
   kafka::transactional_id tx_id,
   tm_etag etag,
-  kafka::group_id group_id) {
+  kafka::group_id group_id,
+  model::term_id term) {
     auto ptx = _tx_table.find(tx_id);
     if (ptx == _tx_table.end()) {
         return false;
@@ -294,7 +295,10 @@ bool tm_stm::add_group(
         return false;
     }
     ptx->second.etag = etag.inc_mem();
-    ptx->second.groups.push_back(group_id);
+    ptx->second.groups.push_back(tm_transaction::tx_group{
+        .group_id = group_id,
+        .etag = term
+    });
     return true;
 }
 

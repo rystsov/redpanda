@@ -58,6 +58,7 @@ public:
     ss::future<kafka::add_partitions_to_txn_response_data> add_partition_to_tx(kafka::add_partitions_to_txn_request_data, model::timeout_clock::duration);
     ss::future<kafka::add_offsets_to_txn_response_data> add_offsets_to_tx(kafka::add_offsets_to_txn_request_data, model::timeout_clock::duration);
     ss::future<begin_tx_reply> begin_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
+    ss::future<begin_group_tx_reply> begin_group_tx(kafka::group_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<kafka::end_txn_response_data> end_txn(kafka::end_txn_request_data, model::timeout_clock::duration);
 
 private:
@@ -71,8 +72,11 @@ private:
     [[maybe_unused]] ss::sharded<cluster::id_allocator_frontend>& _id_allocator_frontend;
     ss::sharded<kafka::coordinator_ntp_mapper>& _coordinator_mapper;
     ss::sharded<kafka::group_router>& _group_router;
+    int16_t _metadata_dissemination_retries;
+    std::chrono::milliseconds _metadata_dissemination_retry_delay_ms;
 
     ss::future<bool> try_create_tx_topic();
+    ss::future<bool> try_create_consumer_group_topic();
 
     [[maybe_unused]] ss::future<checked<tm_transaction, tx_errc>> get_tx(ss::shared_ptr<tm_stm>&, model::producer_identity, kafka::transactional_id, model::timeout_clock::duration);
 
@@ -80,6 +84,8 @@ private:
     ss::future<abort_tx_reply> do_abort_tx(model::ntp, model::producer_identity, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> dispatch_prepare_tx(model::node_id, model::ntp, model::term_id, model::partition_id, model::producer_identity, model::tx_seq, model::timeout_clock::duration);
     ss::future<prepare_tx_reply> do_prepare_tx(model::ntp, model::term_id, model::partition_id, model::producer_identity, model::tx_seq, model::timeout_clock::duration);
+    ss::future<begin_group_tx_reply> dispatch_begin_group_tx(model::node_id, kafka::group_id, model::producer_identity, model::timeout_clock::duration);
+    ss::future<begin_group_tx_reply> do_begin_group_tx(kafka::group_id, model::producer_identity, model::timeout_clock::duration);
     ss::future<commit_group_tx_reply> dispatch_commit_group_tx(model::node_id, kafka::group_id, model::producer_identity, model::tx_seq, model::timeout_clock::duration);
     ss::future<commit_group_tx_reply> do_commit_group_tx(kafka::group_id, model::producer_identity, model::tx_seq, model::timeout_clock::duration);
     ss::future<commit_tx_reply> dispatch_commit_tx(model::node_id, model::ntp, model::producer_identity, model::tx_seq, model::timeout_clock::duration);

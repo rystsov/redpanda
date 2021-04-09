@@ -34,9 +34,9 @@ partition::partition(consensus_ptr r)
         _id_allocator_stm = ss::make_lw_shared<cluster::id_allocator_stm>(
           clusterlog, _raft.get(), config::shard_local_cfg());
     } else if (is_tm_topic(_raft->ntp())) {
-        vassert(_raft->log_config().is_collectable(), "tm log must be collectable");
-        _nop_stm = ss::make_lw_shared<raft::log_eviction_stm>(
-            _raft.get(), clusterlog, stm_manager, _as);
+        if (_raft->log_config().is_collectable()) {
+            _nop_stm = ss::make_lw_shared<raft::log_eviction_stm>(_raft.get(), clusterlog, stm_manager, _as);
+        }
         _tm_stm = ss::make_shared<cluster::tm_stm>(clusterlog, _raft.get());
         stm_manager->add_stm(_tm_stm);
     } else {

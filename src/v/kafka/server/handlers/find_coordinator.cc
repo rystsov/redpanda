@@ -147,6 +147,8 @@ ss::future<response_ptr> find_coordinator_handler::handle(
           }
 
           // the new internal metadata topic for group membership
+          // we also create a consumer group topic in tx_gateway_frontend
+          // see tx_gateway_frontend::begin_group_tx
           cluster::topic_configuration topic{
             ctx.coordinator_mapper().ns(),
             ctx.coordinator_mapper().topic(),
