@@ -48,6 +48,9 @@ public:
     virtual ss::future<commit_group_tx_reply>
     commit_group_tx(commit_group_tx_request&&, rpc::streaming_context&) final;
 
+    virtual ss::future<abort_group_tx_reply>
+    abort_group_tx(abort_group_tx_request&&, rpc::streaming_context&) final;
+
 private:
     [[maybe_unused]] ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
 };

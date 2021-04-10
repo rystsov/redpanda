@@ -373,6 +373,84 @@ tx_gateway_frontend::do_prepare_group_tx(kafka::group_id group_id, model::term_i
     co_return co_await _group_router.local().prepare_tx(std::move(req));
 }
 
+ss::future<abort_group_tx_reply>
+tx_gateway_frontend::abort_group_tx(kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
+    if (!ntp_opt) {
+        vlog(clusterlog.warn, "can't find ntp for {} ", group_id);
+        co_return abort_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+    auto ntp = ntp_opt.value();
+
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        vlog(clusterlog.info, "can't find meta info for {}", ntp);
+        co_return abort_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+
+    auto leader_opt = _leaders.local().get_leader(ntp);
+    if (!leader_opt) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        co_return abort_group_tx_reply {
+            .ec = tx_errc::leader_not_found
+        };
+    }
+    auto leader = leader_opt.value();
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        co_return co_await do_abort_group_tx(group_id, pid, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching begin group tx to {} from {}", leader, _self);
+    co_return co_await dispatch_abort_group_tx(leader, group_id, pid, timeout);
+}
+
+ss::future<abort_group_tx_reply>
+tx_gateway_frontend::dispatch_abort_group_tx(model::node_id leader, kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [group_id, pid, timeout](tx_gateway_client_protocol cp) {
+            return cp.abort_group_tx(
+              abort_group_tx_request{
+                  .group_id = group_id,
+                  .pid = pid,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<abort_group_tx_reply>)
+      .then([](result<abort_group_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote begin group tx",
+                r.error());
+              return abort_group_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<abort_group_tx_reply>
+tx_gateway_frontend::do_abort_group_tx(kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    abort_group_tx_request req;
+    req.group_id = group_id;
+    req.pid = pid;
+    req.timeout = timeout;
+
+    co_return co_await _group_router.local().abort_tx(std::move(req));
+}
+
 ss::future<commit_group_tx_reply>
 tx_gateway_frontend::commit_group_tx(kafka::group_id group_id, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
@@ -873,13 +951,22 @@ tx_gateway_frontend::do_abort_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, cluste
     outcome->set_value(tx_errc::none);
 
     tx = changed_tx.value();
-    std::vector<ss::future<abort_tx_reply>> fs;
+    std::vector<ss::future<abort_tx_reply>> pfs;
     for (auto rm : tx.partitions) {
-        fs.push_back(abort_tx(rm.ntp, tx.pid, timeout));
+        pfs.push_back(abort_tx(rm.ntp, tx.pid, timeout));
     }
-    auto rs = co_await when_all_succeed(fs.begin(), fs.end());
+    std::vector<ss::future<abort_group_tx_reply>> gfs;
+    for (auto group : tx.groups) {
+        gfs.push_back(abort_group_tx(group.group_id, tx.pid, timeout));
+    }
+    auto prs = co_await when_all_succeed(pfs.begin(), pfs.end());
+    auto grs = co_await when_all_succeed(gfs.begin(), gfs.end());
     bool ok = true;
-    for (auto r : rs) {
+    for (auto r : prs) {
+        // TODO: support partition removal, maybe treat it as success?
+        ok = ok && (r.ec == tx_errc::none);
+    }
+    for (auto r : grs) {
         // TODO: support partition removal, maybe treat it as success?
         ok = ok && (r.ec == tx_errc::none);
     }
@@ -1008,13 +1095,21 @@ tx_gateway_frontend::recommit_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction 
 
 ss::future<checked<tm_transaction, tx_errc>>
 tx_gateway_frontend::reabort_tm_tx(ss::shared_ptr<tm_stm>& stm, tm_transaction tx, model::timeout_clock::duration timeout) {
-    std::vector<ss::future<abort_tx_reply>> cfs;
+    std::vector<ss::future<abort_tx_reply>> pfs;
     for (auto rm : tx.partitions) {
-        cfs.push_back(abort_tx(rm.ntp, tx.pid, timeout));
+        pfs.push_back(abort_tx(rm.ntp, tx.pid, timeout));
     }
-    auto crs = co_await when_all_succeed(cfs.begin(), cfs.end());
+    std::vector<ss::future<abort_group_tx_reply>> gfs;
+    for (auto group : tx.groups) {
+        gfs.push_back(abort_group_tx(group.group_id, tx.pid, timeout));
+    }
+    auto prs = co_await when_all_succeed(pfs.begin(), pfs.end());
+    auto grs = co_await when_all_succeed(pfs.begin(), pfs.end());
     auto ok = true;
-    for (auto r : crs) {
+    for (auto r : prs) {
+        ok = ok && (r.ec == tx_errc::none);
+    }
+    for (auto r : grs) {
         ok = ok && (r.ec == tx_errc::none);
     }
     if (ok) {

@@ -67,4 +67,9 @@ tx_gateway::commit_group_tx(commit_group_tx_request&& request, rpc::streaming_co
     return _tx_gateway_frontend.local().do_commit_group_tx(request.group_id, request.pid, request.tx_seq, request.timeout);
 };
 
+ss::future<abort_group_tx_reply>
+tx_gateway::abort_group_tx(abort_group_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_abort_group_tx(request.group_id, request.pid, request.timeout);
+}
+
 } // namespace cluster

@@ -44,6 +44,11 @@
             "name": "commit_group_tx",
             "input_type": "commit_group_tx_request",
             "output_type": "commit_group_tx_reply"
+        },
+        {
+            "name": "abort_group_tx",
+            "input_type": "abort_group_tx_request",
+            "output_type": "abort_group_tx_reply"
         }
     ]
 }

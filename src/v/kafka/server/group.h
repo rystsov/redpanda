@@ -433,6 +433,8 @@ public:
 
     ss::future<cluster::prepare_group_tx_reply> prepare_tx(cluster::prepare_group_tx_request&&);
 
+    ss::future<cluster::abort_group_tx_reply> abort_tx(cluster::abort_group_tx_request&&);
+
     ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
     
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
@@ -445,6 +447,9 @@ public:
 
     ss::future<cluster::prepare_group_tx_reply>
     handle_prepare_tx(cluster::prepare_group_tx_request&& r);
+
+    ss::future<cluster::abort_group_tx_reply>
+    handle_abort_tx(cluster::abort_group_tx_request&& r);
     
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);

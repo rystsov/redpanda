@@ -736,6 +736,45 @@ group_manager::prepare_tx(cluster::prepare_group_tx_request&& r) {
     }
 }
 
+ss::future<cluster::abort_group_tx_reply>
+group_manager::abort_tx(cluster::abort_group_tx_request&& r) {
+    if (!_catchup_lock.take_reader_lock()) {
+        cluster::abort_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::coordinator_load_in_progress;
+        co_return reply;
+    }
+
+    try {
+        // wrap in take mutex, most time begin_tx is in memory
+        auto error = validate_group_status(
+          r.ntp, r.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            cluster::abort_group_tx_reply reply;
+            if (error == error_code::not_coordinator) {
+                reply.ec = cluster::tx_errc::not_coordinator;
+            } else {
+                reply.ec = cluster::tx_errc::timeout;
+            }
+            co_return reply;
+        }
+
+        auto group = get_group(r.group_id);
+        if (!group) {
+            cluster::abort_group_tx_reply reply;
+            reply.ec = cluster::tx_errc::timeout;
+            co_return reply;
+        }
+
+        // pass last term
+        auto reply = co_await group->handle_abort_tx(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
+    }
+}
+
 ss::future<offset_commit_response>
 group_manager::offset_commit(offset_commit_request&& r) {
     auto error = validate_group_status(

@@ -183,6 +183,15 @@ struct commit_group_tx_request {
 struct commit_group_tx_reply {
     tx_errc ec;
 };
+struct abort_group_tx_request {
+    model::ntp ntp;
+    kafka::group_id group_id;
+    model::producer_identity pid;
+    model::timeout_clock::duration timeout;
+};
+struct abort_group_tx_reply {
+    tx_errc ec;
+};
 
 /// Join request sent by node to join raft-0
 struct join_request {

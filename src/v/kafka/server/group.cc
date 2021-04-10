@@ -1314,6 +1314,12 @@ group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
     co_return cluster::prepare_group_tx_reply();
 }
 
+ss::future<cluster::abort_group_tx_reply>
+group::abort_tx(cluster::abort_group_tx_request&&) {
+    vlog(klog.info, "SHAI: ABORT GROUP TX");
+    co_return cluster::abort_group_tx_reply();
+}
+
 // store_txn_offsets + PREPARE
 ss::future<txn_offset_commit_response>
 group::store_txn_offsets(txn_offset_commit_request&& req) {
@@ -1616,6 +1622,28 @@ group::handle_prepare_tx(cluster::prepare_group_tx_request&& r) {
     } else {
         vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
         cluster::prepare_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::timeout;
+        co_return reply;
+    }
+}
+
+ss::future<cluster::abort_group_tx_reply>
+group::handle_abort_tx(cluster::abort_group_tx_request&& r) {
+    if (in_state(group_state::dead)) {
+        cluster::abort_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::coordinator_not_available;
+        co_return reply;
+    } else if (in_state(group_state::empty)) {
+        co_return co_await abort_tx(std::move(r));
+    } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        co_return co_await abort_tx(std::move(r));
+    } else if (in_state(group_state::completing_rebalance)) {
+        cluster::abort_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::rebalance_in_progress;
+        co_return reply;
+    } else {
+        vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
+        cluster::abort_group_tx_reply reply;
         reply.ec = cluster::tx_errc::timeout;
         co_return reply;
     }
