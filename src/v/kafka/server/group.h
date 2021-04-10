@@ -512,9 +512,12 @@ private:
     config::configuration& _conf;
     ss::lw_shared_ptr<cluster::partition> _partition;
     absl::node_hash_map<model::topic_partition, offset_metadata> _offsets;
+    
+    model::term_id _term;
     absl::node_hash_map<model::topic_partition, offset_metadata>
       _pending_offset_commits;
     absl::node_hash_map<int64_t, group_ongoing_tx> _ongoing_txs;
+    absl::flat_hash_map<model::producer_id, model::producer_epoch> _fence_pid_epoch;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;

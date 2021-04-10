@@ -1191,7 +1191,13 @@ void group::insert_ongoing(group_ongoing_tx tx) {
 }
 
 void
-group::reset_tx_state([[maybe_unused]] model::term_id term) {}
+group::reset_tx_state([[maybe_unused]] model::term_id term) {
+    _term = term;
+//  state.ongoing = {}
+//  state.fenced = {}
+//  state.prepared = {}
+//  state.expecting = {}
+}
 
 ss::future<mark_group_committed_result>
 group::mark_committed(mark_group_committed_request&& req) {
@@ -1245,12 +1251,18 @@ group::mark_committed(mark_group_committed_request&& req) {
 
     co_return mark_group_committed_result();
 }
-// group::reset_state(term):
-//  term = $term
-//  state.ongoing = {}
-//  state.fenced = {}
-//  state.prepared = {}
-//  state.expecting = {}
+
+static cluster::begin_group_tx_reply make_begin_tx_reply(cluster::tx_errc ec) {
+    cluster::begin_group_tx_reply reply;
+    reply.ec = ec;
+    return reply;
+}
+
+static cluster::prepare_group_tx_reply make_prepare_tx_reply(cluster::tx_errc ec) {
+    cluster::prepare_group_tx_reply reply;
+    reply.ec = ec;
+    return reply;
+}
 
 ss::future<cluster::begin_group_tx_reply>
 group::begin_tx(cluster::begin_group_tx_request&& r) {
@@ -1259,6 +1271,45 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
     //   reply timeout
     // if consensus.term <  term:
     //   vassert(false) // consensus.term can't go back
+    if (_partition->term() != _term) {
+        co_return make_begin_tx_reply(cluster::tx_errc::timeout);
+    }
+
+    //
+
+    auto fence_it = _fence_pid_epoch.find(r.pid.get_id()); 
+    if (fence_it == _fence_pid_epoch.end() || r.pid.get_epoch() > fence_it->second) {
+        /*  auto batch = make_fence_batch(pid);
+        auto reader = model::make_memory_record_batch_reader(std::move(batch));
+        auto r = co_await _c->replicate(
+          _insync_term,
+          std::move(reader),
+          raft::replicate_options(raft::consistency_level::quorum_ack));
+        if (!r) {
+            vlog(
+              clusterlog.error,
+              "Error \"{}\" on replicating pid:{} fencing batch",
+              r.error(),
+              pid);
+            co_return tx_errc::timeout;
+        }
+        if (!co_await wait_no_throw(
+              model::offset(r.value().last_offset()), _sync_timeout)) {
+            co_return tx_errc::timeout;
+        }
+        fence_it = _log_state.fence_pid_epoch.find(id(pid));
+        if (fence_it == _log_state.fence_pid_epoch.end()) {
+            vlog(
+              clusterlog.error,
+              "Unexpected state: can't find fencing token by id after "
+              "replicating {}",
+              pid);
+            co_return tx_errc::timeout;
+        } */
+    }
+    
+    
+    
     // if req.pid.epoch < state.fenced[req.pid.id].epoch
     //   reply fenced
     // if req.pid.epoch <= state.ongoing[req.pid.id].pid.epoch:
@@ -1313,6 +1364,10 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
 
 ss::future<cluster::prepare_group_tx_reply>
 group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
+    if (_partition->term() != _term) {
+        co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
+    }
+    
     vlog(klog.info, "SHAI: PREPARE GROUP TX");
     co_return cluster::prepare_group_tx_reply();
 }
@@ -1326,6 +1381,10 @@ group::abort_tx(cluster::abort_group_tx_request&&) {
 // store_txn_offsets + PREPARE
 ss::future<txn_offset_commit_response>
 group::store_txn_offsets(txn_offset_commit_request&& req) {
+    if (_partition->term() != _term) {
+        co_return txn_offset_commit_response(req, error_code::unknown_server_error);
+    }
+    
     // if $pid in state.aborting:
     //   $mutex.release
     //   reply error
