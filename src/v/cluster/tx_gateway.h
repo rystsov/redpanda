@@ -42,6 +42,9 @@ public:
     virtual ss::future<begin_group_tx_reply>
     begin_group_tx(begin_group_tx_request&&, rpc::streaming_context&) final;
 
+    virtual ss::future<prepare_group_tx_reply>
+    prepare_group_tx(prepare_group_tx_request&&,rpc::streaming_context&) final;
+
     virtual ss::future<commit_group_tx_reply>
     commit_group_tx(commit_group_tx_request&&, rpc::streaming_context&) final;
 

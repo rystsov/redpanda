@@ -163,6 +163,17 @@ struct begin_group_tx_reply {
     model::term_id etag;
     tx_errc ec;
 };
+struct prepare_group_tx_request {
+    model::ntp ntp;
+    kafka::group_id group_id;
+    model::term_id etag;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct prepare_group_tx_reply {
+    tx_errc ec;
+};
 struct commit_group_tx_request {
     model::producer_identity pid;
     model::tx_seq tx_seq;

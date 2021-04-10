@@ -36,6 +36,11 @@
             "output_type": "begin_group_tx_reply"
         },
         {
+            "name": "prepare_group_tx",
+            "input_type": "prepare_group_tx_request",
+            "output_type": "prepare_group_tx_reply"
+        },
+        {
             "name": "commit_group_tx",
             "input_type": "commit_group_tx_request",
             "output_type": "commit_group_tx_reply"

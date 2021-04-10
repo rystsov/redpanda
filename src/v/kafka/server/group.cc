@@ -1250,7 +1250,7 @@ group::mark_committed(mark_group_committed_request&& req) {
 //  state.expecting = {}
 
 ss::future<cluster::begin_group_tx_reply>
-group::begin_tx([[maybe_unused]] cluster::begin_group_tx_request&& r) {
+group::begin_tx(cluster::begin_group_tx_request&& r) {
     // if term < consensus.term:
     //   group_manager::handle_partition_leader_change is about to replace state
     //   reply timeout
@@ -1306,6 +1306,12 @@ group::begin_tx([[maybe_unused]] cluster::begin_group_tx_request&& r) {
     cluster::begin_group_tx_reply reply;
     // TODO add term
     co_return reply;
+}
+
+ss::future<cluster::prepare_group_tx_reply>
+group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
+    vlog(klog.info, "SHAI: PREPARE GROUP TX");
+    co_return cluster::prepare_group_tx_reply();
 }
 
 // store_txn_offsets + PREPARE
@@ -1588,6 +1594,28 @@ group::handle_begin_tx(cluster::begin_group_tx_request&& r) {
     } else {
         vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
         cluster::begin_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::timeout;
+        co_return reply;
+    }
+}
+
+ss::future<cluster::prepare_group_tx_reply>
+group::handle_prepare_tx(cluster::prepare_group_tx_request&& r) {
+    if (in_state(group_state::dead)) {
+        cluster::prepare_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::coordinator_not_available;
+        co_return reply;
+    } else if (in_state(group_state::empty)) {
+        co_return co_await prepare_tx(std::move(r));
+    } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        co_return co_await prepare_tx(std::move(r));
+    } else if (in_state(group_state::completing_rebalance)) {
+        cluster::prepare_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::rebalance_in_progress;
+        co_return reply;
+    } else {
+        vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
+        cluster::prepare_group_tx_reply reply;
         reply.ec = cluster::tx_errc::timeout;
         co_return reply;
     }

@@ -57,6 +57,11 @@ tx_gateway::begin_group_tx(begin_group_tx_request&& request, [[maybe_unused]] rp
     return _tx_gateway_frontend.local().do_begin_group_tx(request.group_id, request.pid, request.timeout);
 };
 
+ss::future<prepare_group_tx_reply>
+tx_gateway::prepare_group_tx(prepare_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().do_prepare_group_tx(request.group_id, request.etag, request.pid, request.tx_seq, request.timeout);
+};
+
 ss::future<commit_group_tx_reply>
 tx_gateway::commit_group_tx(commit_group_tx_request&& request, rpc::streaming_context&) {
     return _tx_gateway_frontend.local().do_commit_group_tx(request.group_id, request.pid, request.tx_seq, request.timeout);

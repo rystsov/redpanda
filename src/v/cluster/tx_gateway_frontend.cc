@@ -291,6 +291,88 @@ tx_gateway_frontend::do_begin_group_tx(kafka::group_id group_id, model::producer
     co_return reply;
 }
 
+ss::future<prepare_group_tx_reply>
+tx_gateway_frontend::prepare_group_tx(kafka::group_id group_id, model::term_id etag, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
+    if (!ntp_opt) {
+        vlog(clusterlog.warn, "can't find ntp for {} ", group_id);
+        co_return prepare_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+    auto ntp = ntp_opt.value();
+
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        vlog(clusterlog.info, "can't find meta info for {}", ntp);
+        co_return prepare_group_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        };
+    }
+
+    auto leader_opt = _leaders.local().get_leader(ntp);
+    if (!leader_opt) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        co_return prepare_group_tx_reply {
+            .ec = tx_errc::leader_not_found
+        };
+    }
+    auto leader = leader_opt.value();
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        co_return co_await do_prepare_group_tx(group_id, etag, pid, tx_seq, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching begin group tx to {} from {}", leader, _self);
+    co_return co_await dispatch_prepare_group_tx(leader, group_id, etag, pid, tx_seq, timeout);
+}
+
+ss::future<prepare_group_tx_reply>
+tx_gateway_frontend::dispatch_prepare_group_tx(model::node_id leader, kafka::group_id group_id, model::term_id etag, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [group_id, etag, pid, tx_seq, timeout](tx_gateway_client_protocol cp) {
+            return cp.prepare_group_tx(
+              prepare_group_tx_request{
+                  .group_id = group_id,
+                  .etag = etag,
+                  .pid = pid,
+                  .tx_seq = tx_seq,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<prepare_group_tx_reply>)
+      .then([](result<prepare_group_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote begin group tx",
+                r.error());
+              return prepare_group_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<prepare_group_tx_reply>
+tx_gateway_frontend::do_prepare_group_tx(kafka::group_id group_id, model::term_id etag, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    prepare_group_tx_request req;
+    req.group_id = group_id;
+    req.etag = etag;
+    req.pid = pid;
+    req.tx_seq = tx_seq;
+    req.timeout = timeout;
+
+    co_return co_await _group_router.local().prepare_tx(std::move(req));
+}
+
 ss::future<commit_group_tx_reply>
 tx_gateway_frontend::commit_group_tx(kafka::group_id group_id, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
     auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
@@ -827,6 +909,11 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
         pfs.push_back(prepare_tx(rm.ntp, rm.etag, model::kafka_tx_ntp.tp.partition, tx.pid, tx.tx_seq, timeout));
     }
 
+    std::vector<ss::future<prepare_group_tx_reply>> pgfs;
+    for (auto group : tx.groups) {
+        pgfs.push_back(prepare_group_tx(group.group_id, group.etag, tx.pid, tx.tx_seq, timeout));
+    }
+
     if (tx.status == tm_transaction::tx_status::ongoing) {
         auto became_preparing_tx = co_await stm->try_change_status(tx.id, tx.etag, cluster::tm_transaction::tx_status::preparing);
         if (!became_preparing_tx.has_value()) {
@@ -837,9 +924,15 @@ tx_gateway_frontend::do_commit_tm_tx(ss::shared_ptr<cluster::tm_stm>& stm, clust
         tx = became_preparing_tx.value();
     }
     
-    auto prs = co_await when_all_succeed(pfs.begin(), pfs.end());
     bool ok = true;
+    auto prs = co_await when_all_succeed(pfs.begin(), pfs.end());
     for (auto r : prs) {
+        // TODO: support partition removal, maybe treat it as success?
+        // TODO: handle etag violations => abort
+        ok = ok && (r.ec == tx_errc::none);
+    }
+    auto pgrs = co_await when_all_succeed(pgfs.begin(), pgfs.end());
+    for (auto r : pgrs) {
         // TODO: support partition removal, maybe treat it as success?
         // TODO: handle etag violations => abort
         ok = ok && (r.ec == tx_errc::none);
