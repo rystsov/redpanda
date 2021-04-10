@@ -47,11 +47,11 @@ ss::future<> group_manager::start() {
     _leader_notify_handle = _gm.local().register_leadership_notification(
       [this](
         raft::group_id group,
-        [[maybe_unused]] model::term_id term,
+        model::term_id term,
         std::optional<model::node_id> leader_id) {
           auto p = _pm.local().partition_for(group);
           if (p) {
-              handle_leader_change(p, leader_id);
+              handle_leader_change(term, p, leader_id);
           }
       });
 
@@ -170,13 +170,14 @@ void group_manager::handle_topic_delta(
 }
 
 void group_manager::handle_leader_change(
+  model::term_id term,
   ss::lw_shared_ptr<cluster::partition> part,
   std::optional<model::node_id> leader) {
-    (void)with_gate(_gate, [this, part = std::move(part), leader] {
+    (void)with_gate(_gate, [this, term, part = std::move(part), leader] {
         if (auto it = _partitions.find(part->ntp()); it != _partitions.end()) {
             return ss::with_semaphore(
-              it->second->sem, 1, [this, p = it->second, leader] {
-                  return handle_partition_leader_change(p, leader);
+              it->second->sem, 1, [this, term, p = it->second, leader] {
+                  return handle_partition_leader_change(term, p, leader);
               });
         }
         return ss::make_ready_future<>();
@@ -205,6 +206,7 @@ ss::future<> group_manager::inject_noop(
 }
 
 ss::future<> group_manager::handle_partition_leader_change(
+  model::term_id term,
   ss::lw_shared_ptr<attached_partition> p,
   std::optional<model::node_id> leader_id) {
     /*
@@ -225,8 +227,8 @@ ss::future<> group_manager::handle_partition_leader_change(
         // save term
         // take a mutex
         // TODO: instead of the read only delta
-        return _catchup_lock.take_writer_lock().then([this, timeout, p] { 
-            return inject_noop(p->partition, timeout).then([this, timeout, p] {
+        return _catchup_lock.take_writer_lock().then([this, term, timeout, p] { 
+            return inject_noop(p->partition, timeout).then([this, term, timeout, p] {
                 /*
                  * the full log is read and deduplicated. the dedupe processing is
                  * based on the record keys, so this code should be ready to
@@ -245,16 +247,16 @@ ss::future<> group_manager::handle_partition_leader_change(
                   std::nullopt);
 
               return p->partition->make_reader(reader_config)
-                .then([this, p, timeout](model::record_batch_reader reader) {
+                .then([this, term, p, timeout](model::record_batch_reader reader) {
                     return std::move(reader)
                       .consume(recovery_batch_consumer(p->as), timeout)
-                      .then([this, p](recovery_batch_consumer_state state) {
+                      .then([this, term, p](recovery_batch_consumer_state state) {
                           // avoid trying to recover if we stopped the reader
                           // because an abort was requested
                           if (p->as.abort_requested()) {
                               return ss::make_ready_future<>();
                           }
-                          return recover_partition(p->partition, std::move(state))
+                          return recover_partition(term, p->partition, std::move(state))
                             .then([p] { p->loading = false; });
                       });
                       // set last term = term
@@ -274,8 +276,12 @@ ss::future<> group_manager::handle_partition_leader_change(
  * dependencies that would support optimizing for moves.
  */
 ss::future<> group_manager::recover_partition(
+  model::term_id term,
   ss::lw_shared_ptr<cluster::partition> p, recovery_batch_consumer_state ctx) {
-    // group.reset_state(term)
+    for (auto& [_, group] : _groups) {
+        group->reset_tx_state(term);
+    }
+
     for (auto& [group_id, group_stm] : ctx.groups) {
         if (group_stm.has_data()) {
             auto group = get_group(group_id);

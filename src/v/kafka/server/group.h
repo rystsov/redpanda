@@ -427,6 +427,8 @@ public:
     void fail_offset_commit(
       const model::topic_partition& tp, const offset_metadata& md);
 
+    void reset_tx_state(model::term_id);
+
     ss::future<mark_group_committed_result> mark_committed(mark_group_committed_request&& r);
 
     ss::future<cluster::begin_group_tx_reply> begin_tx(cluster::begin_group_tx_request&&);

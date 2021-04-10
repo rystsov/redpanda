@@ -1190,6 +1190,9 @@ void group::insert_ongoing(group_ongoing_tx tx) {
     }
 }
 
+void
+group::reset_tx_state([[maybe_unused]] model::term_id term) {}
+
 ss::future<mark_group_committed_result>
 group::mark_committed(mark_group_committed_request&& req) {
     auto r = std::move(req);
