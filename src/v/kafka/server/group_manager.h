@@ -112,6 +112,8 @@ struct recovery_batch_consumer_state;
  */
 class group_manager {
 public:
+    static constexpr model::control_record_version fence_control_record_version{0};
+    
     group_manager(
       ss::sharded<raft::group_manager>& gm,
       ss::sharded<cluster::partition_manager>& pm,
@@ -238,9 +240,6 @@ private:
         }
     };
 
-    absl::node_hash_map<model::ntp, ss::lw_shared_ptr<attached_partition>>
-      _partitions;
-
     cluster::notification_id_type _leader_notify_handle;
     cluster::notification_id_type _topic_table_notify_handle;
 
@@ -269,6 +268,19 @@ private:
     ss::sharded<cluster::topic_table>& _topic_table;
     config::configuration& _conf;
     absl::node_hash_map<group_id, group_ptr> _groups;
+    
+    struct group_partition {
+        model::term_id term;
+        ss::lw_shared_ptr<attached_partition> partition;
+        absl::flat_hash_map<model::producer_id, model::producer_epoch> fence_pid_epoch;
+    };
+
+    absl::flat_hash_map<model::ntp, group_partition> _partitions2;
+    absl::node_hash_map<model::ntp, ss::lw_shared_ptr<attached_partition>> _partitions;
+    // 
+    
+    
+    
     model::broker _self;
     read_write_lw_lock _catchup_lock;
 };

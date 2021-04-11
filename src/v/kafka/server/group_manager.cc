@@ -281,6 +281,7 @@ ss::future<> group_manager::recover_partition(
     for (auto& [_, group] : _groups) {
         group->reset_tx_state(term);
     }
+    // _term = term;
 
     for (auto& [group_id, group_stm] : ctx.groups) {
         if (group_stm.has_data()) {
@@ -397,6 +398,8 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
         group_it->second.commit(bid);
 
         return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+    // } else if() {
+    // SHAI
     } else {
         klog.trace("ignorning batch with type {}", int(batch.header().type));
         return ss::make_ready_future<ss::stop_iteration>(

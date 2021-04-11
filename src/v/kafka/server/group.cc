@@ -20,6 +20,7 @@
 #include "likely.h"
 #include "utils/to_string.h"
 #include "vassert.h"
+#include "cluster/tx_utils.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
@@ -1275,46 +1276,46 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
         co_return make_begin_tx_reply(cluster::tx_errc::timeout);
     }
 
-    //
-
     auto fence_it = _fence_pid_epoch.find(r.pid.get_id()); 
     if (fence_it == _fence_pid_epoch.end() || r.pid.get_epoch() > fence_it->second) {
-        /*  auto batch = make_fence_batch(pid);
+        auto batch = cluster::make_fence_batch(fence_control_record_version, r.pid);  
         auto reader = model::make_memory_record_batch_reader(std::move(batch));
-        auto r = co_await _c->replicate(
-          _insync_term,
-          std::move(reader),
-          raft::replicate_options(raft::consistency_level::quorum_ack));
-        if (!r) {
+        auto e = co_await _partition->replicate(_term, std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
+
+        if (!e) {
             vlog(
-              clusterlog.error,
+              klog.error,
               "Error \"{}\" on replicating pid:{} fencing batch",
-              r.error(),
-              pid);
-            co_return tx_errc::timeout;
+              e.error(),
+              r.pid);
+            cluster::begin_group_tx_reply reply;
+            reply.ec = cluster::tx_errc::timeout;
+            co_return reply;
         }
-        if (!co_await wait_no_throw(
-              model::offset(r.value().last_offset()), _sync_timeout)) {
-            co_return tx_errc::timeout;
-        }
-        fence_it = _log_state.fence_pid_epoch.find(id(pid));
-        if (fence_it == _log_state.fence_pid_epoch.end()) {
-            vlog(
-              clusterlog.error,
-              "Unexpected state: can't find fencing token by id after "
-              "replicating {}",
-              pid);
-            co_return tx_errc::timeout;
-        } */
+
+        fence_it = _fence_pid_epoch.find(r.pid.get_id());
     }
-    
-    
-    
+
     // if req.pid.epoch < state.fenced[req.pid.id].epoch
     //   reply fenced
     // if req.pid.epoch <= state.ongoing[req.pid.id].pid.epoch:
     //   client will bump epoch and get another greater that ongoing
     //   reply fenced
+    if (fence_it == _fence_pid_epoch.end()) {
+        _fence_pid_epoch.emplace(r.pid.get_id(), r.pid.get_epoch());
+    } else if (r.pid.get_epoch() > fence_it->second) {
+        fence_it->second = r.pid.get_epoch();
+    } else {
+        vlog(
+          klog.error,
+          "pid {} fenced out by epoch {}",
+          r.pid,
+          fence_it->second);
+        cluster::begin_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::fenced;
+        co_return reply;
+    }
+
     // if req.pid in state.expecting:
     //   // TODO: add GC
     //   reply fenced
@@ -1335,30 +1336,8 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
     // state.expecting[req.pid] = term
     // reply term
 
-    iobuf key;
-    kafka::response_writer w(key);
-    w.write(group::fence_control_record_version());
-
-    storage::record_batch_builder builder(cluster::tx_fence_batch_type, model::offset(0));
-    builder.set_producer_identity(r.pid.id, r.pid.epoch);
-    builder.set_control_type();
-    builder.add_raw_kw(
-      std::move(key), std::nullopt, std::vector<model::record_header>());
-
-    auto batch = std::move(builder).build();
-
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
-
-    auto e = co_await _partition->replicate(std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
-
-    if (!e) {
-        cluster::begin_group_tx_reply reply;
-        reply.ec = cluster::tx_errc::timeout;
-        co_return reply;
-    }
-
     cluster::begin_group_tx_reply reply;
-    // TODO add term
+    reply.etag = _term;
     co_return reply;
 }
 
