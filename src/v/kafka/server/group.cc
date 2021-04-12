@@ -1176,18 +1176,12 @@ void group::fail_offset_commit(
 }
 
 void group::insert_ongoing(group_ongoing_tx tx) {
-    auto [ongoing_it, inserted] = _ongoing_txs.try_emplace(tx.pid.id, tx);
-    if (!inserted && ongoing_it->second.pid.epoch > tx.pid.epoch) {
-        vlog(klog.info, "already ongoing tx {} fenced out currect tx {}", ongoing_it->second.pid, tx.pid);
-        return;
-    } else if (!inserted && ongoing_it->second.pid.epoch < tx.pid.epoch) {
-        vlog(klog.info, "current tx {} fenced already ongoing tx {}", tx.pid, ongoing_it->second.pid);
-        ongoing_it->second.pid = tx.pid;
-        ongoing_it->second.offsets.clear();
-    }
+    auto [pending_it, inserted] = _prepared_txs.try_emplace(tx.pid, prepared_tx {
+        .offsets = tx.offsets
+    });
 
     for (const auto& [tp, md] : tx.offsets) {
-        ongoing_it->second.offsets[tp] = md;
+        pending_it->second.offsets[tp] = md;
     }
 }
 
@@ -1203,15 +1197,10 @@ group::reset_tx_state(model::term_id term) {
 ss::future<mark_group_committed_result>
 group::mark_committed(mark_group_committed_request&& req) {
     auto r = std::move(req);
-    auto ongoing_it = _ongoing_txs.find(r.data.pid.id);
-    if (ongoing_it == _ongoing_txs.end()) {
+    auto ongoing_it = _prepared_txs.find(r.data.pid);
+    if (ongoing_it == _prepared_txs.end()) {
         vlog(klog.warn, "can't find a tx {}, probably already comitted", r.data.pid);
         co_return mark_group_committed_result(r, error_code::none);
-    }
-
-    if (ongoing_it->second.pid.epoch != r.data.pid.epoch) {
-        vlog(klog.info, "ongoing tx {} doesn't match committing tx {}", ongoing_it->second.pid, r.data.pid);
-        co_return mark_group_committed_result(r, error_code::invalid_producer_epoch);
     }
 
     iobuf key;
@@ -1232,12 +1221,8 @@ group::mark_committed(mark_group_committed_request&& req) {
         co_return mark_group_committed_result(r, error_code::unknown_server_error);
     }
 
-    ongoing_it = _ongoing_txs.find(r.data.pid.id);
-    if (ongoing_it == _ongoing_txs.end()) {
-        co_return mark_group_committed_result();
-    }
-
-    if (ongoing_it->second.pid.epoch != r.data.pid.epoch) {
+    ongoing_it = _prepared_txs.find(r.data.pid);
+    if (ongoing_it == _prepared_txs.end()) {
         co_return mark_group_committed_result();
     }
 
@@ -1248,7 +1233,7 @@ group::mark_committed(mark_group_committed_request&& req) {
         }
     }
 
-    _ongoing_txs.erase(ongoing_it);
+    _prepared_txs.erase(ongoing_it);
 
     co_return mark_group_committed_result();
 }
@@ -1273,6 +1258,12 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
     // if consensus.term <  term:
     //   vassert(false) // consensus.term can't go back
     if (_partition->term() != _term) {
+        co_return make_begin_tx_reply(cluster::tx_errc::timeout);
+    }
+
+    auto [_, inserted] = _volatile_txs.try_emplace(r.pid, volatile_tx());
+
+    if (!inserted) {
         co_return make_begin_tx_reply(cluster::tx_errc::timeout);
     }
 
@@ -1307,47 +1298,7 @@ group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
     if (_partition->term() != _term) {
         co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
     }
-    
-    co_return cluster::prepare_group_tx_reply();
-}
 
-ss::future<cluster::abort_group_tx_reply>
-group::abort_tx(cluster::abort_group_tx_request&&) {
-    co_return cluster::abort_group_tx_reply();
-}
-
-// store_txn_offsets + PREPARE
-ss::future<txn_offset_commit_response>
-group::store_txn_offsets(txn_offset_commit_request&& req) {
-    if (_partition->term() != _term) {
-        co_return txn_offset_commit_response(req, error_code::unknown_server_error);
-    }
-    
-    // if $pid in state.aborting:
-    //   $mutex.release
-    //   reply error
-    // if req.pid not in state.expecting:
-    //   reply timeout // client error
-    // if term < consensus.term:
-    //   group_manager::handle_partition_leader_change is about to replace state
-    //   reply timeout
-    // if consensus.term <  term:
-    //   vassert(false) // consensus.term can't go back
-    // if pid.id in state.fenced 
-    //   if pid.epoch < state.fenced[pid.id].epoch
-    //     reply fenced
-    //   if state.fenced[pid.id].epoch < pid.epoch
-    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
-    //                 // and in the begin bump fence
-    // else:
-    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
-    // if req.pid.id not in state.ongoing:
-    //   reply error // log vlog.error not fatal bug
-    // if state.ongoing[req.pid.id].epoch != req.pid.epoch:
-    //   reply error // log vlog.error not fatal bug
-    // state.ongoing[req.pid.id].offsets[req.tp]=req.offset
-    // return ok
-    
     // PREPARE: follow up code becomes prepare($mutex, $term, $pid)
 
     // if $pid in state.aborting:
@@ -1397,49 +1348,34 @@ group::store_txn_offsets(txn_offset_commit_request&& req) {
     //   reply ok
     // else:
     //   reply timeout
-    
-    auto r = std::move(req);
-    model::producer_identity pid {
-        .id = r.data.producer_id,
-        .epoch = r.data.producer_epoch
-    };
 
-    auto tx = group_ongoing_tx {
-        .pid = pid,
-        .group_id = r.data.group_id
-    };
-
-    auto [ongoing_it, inserted] = _ongoing_txs.try_emplace(pid.id, tx);
-    if (!inserted && ongoing_it->second.pid.epoch > pid.epoch) {
-        co_return txn_offset_commit_response(r, error_code::invalid_producer_epoch);
-    } else if (!inserted && ongoing_it->second.pid.epoch < pid.epoch) {
-        ongoing_it->second.pid = pid;
-        ongoing_it->second.offsets.clear();
+    auto tx_it = _volatile_txs.find(r.pid);
+    if (tx_it == _volatile_txs.end()) {
+        co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
     }
 
     auto tx_entry = group_log_inflight_tx {
-        .group_id = r.data.group_id,
-        .pid = pid
+        .group_id = r.group_id,
+        .pid = r.pid
     };
 
-    for (const auto& t : r.data.topics) {
-        for (const auto& p : t.partitions) {
-            group_log_inflight_tx_tp_update tx_update;
-            
-            model::topic_partition tp(t.name, p.partition_index);
-            tx_update.tp = tp;
-            tx_update.offset = p.committed_offset;
-            tx_update.leader_epoch = p.committed_leader_epoch;
-            tx_update.metadata = p.committed_metadata.value_or("");
-            tx_entry.updates.push_back(tx_update);
-        }
+    for (const auto& [tp, offset] : tx_it->second.offsets) {
+        group_log_inflight_tx_tp_update tx_update;
+        
+        tx_update.tp = tp;
+        tx_update.offset = offset.offset;
+        tx_update.leader_epoch = offset.leader_epoch;
+        tx_update.metadata = offset.metadata;
+        tx_entry.updates.push_back(tx_update);
     }
+
+    _volatile_txs.erase(tx_it);
 
     iobuf key;
     kafka::response_writer w(key);
     w.write(inflight_tx_record_version());
     storage::record_batch_builder builder(cluster::group_infight_tx_batch_type, model::offset(0));
-    builder.set_producer_identity(pid.id, pid.epoch);
+    builder.set_producer_identity(r.pid.id, r.pid.epoch);
     builder.set_control_type();
     builder.add_raw_kw(std::move(key), reflection::to_iobuf(std::move(tx_entry)), std::vector<model::record_header>());
     auto batch = std::move(builder).build();
@@ -1448,19 +1384,85 @@ group::store_txn_offsets(txn_offset_commit_request&& req) {
     auto e = co_await _partition->replicate(std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
 
     if (!e) {
-        co_return txn_offset_commit_response(r, error_code::unknown_server_error);
+        co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
     }
+
+    prepared_tx tx;
+
+    for (const auto& [tp, offset] : tx_it->second.offsets) {
+        offset_metadata md{
+            .log_offset = e.value().last_offset,
+            .offset = offset.offset,
+            .metadata = offset.metadata.value_or("")
+        };
+        tx.offsets[tp] = md;
+    }
+
+    _prepared_txs.try_emplace(r.pid, tx);
+
+    co_return cluster::prepare_group_tx_reply();
+}
+
+ss::future<cluster::abort_group_tx_reply>
+group::abort_tx(cluster::abort_group_tx_request&&) {
+    co_return cluster::abort_group_tx_reply();
+}
+
+// store_txn_offsets + PREPARE
+ss::future<txn_offset_commit_response>
+group::store_txn_offsets(txn_offset_commit_request&& req) {
+    if (_partition->term() != _term) {
+        co_return txn_offset_commit_response(req, error_code::unknown_server_error);
+    }
+
+    auto r = std::move(req);
+    model::producer_identity pid {
+        .id = r.data.producer_id,
+        .epoch = r.data.producer_epoch
+    };
+
+    auto tx_it = _volatile_txs.find(pid);
+
+    if (tx_it == _volatile_txs.end()) {
+        co_return txn_offset_commit_response(req, error_code::unknown_server_error);
+    }
+    
+    // put in memory
+    
+    // if $pid in state.aborting:
+    //   $mutex.release
+    //   reply error
+    // if req.pid not in state.expecting:
+    //   reply timeout // client error
+    // if term < consensus.term:
+    //   group_manager::handle_partition_leader_change is about to replace state
+    //   reply timeout
+    // if consensus.term <  term:
+    //   vassert(false) // consensus.term can't go back
+    // if pid.id in state.fenced 
+    //   if pid.epoch < state.fenced[pid.id].epoch
+    //     reply fenced
+    //   if state.fenced[pid.id].epoch < pid.epoch
+    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
+    //                 // and in the begin bump fence
+    // else:
+    //     reply error // client error, call to store_txn_offsets before add_txn_offset which should call begin
+    // if req.pid.id not in state.ongoing:
+    //   reply error // log vlog.error not fatal bug
+    // if state.ongoing[req.pid.id].epoch != req.pid.epoch:
+    //   reply error // log vlog.error not fatal bug
+    // state.ongoing[req.pid.id].offsets[req.tp]=req.offset
+    // return ok
 
     for (const auto& t : r.data.topics) {
         for (const auto& p : t.partitions) {
             model::topic_partition tp(t.name, p.partition_index);
-            offset_metadata md{
-              .log_offset = e.value().last_offset,
+            volatile_offset md {
               .offset = p.committed_offset,
-              .metadata = p.committed_metadata.value_or(""),
+              .leader_epoch = p.committed_leader_epoch,
+              .metadata = p.committed_metadata
             };
-            // can we overwrite with lower offset?
-            ongoing_it->second.offsets[tp] = md;
+            tx_it->second.offsets[tp] = md;
         }
     }
 

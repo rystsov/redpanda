@@ -516,8 +516,33 @@ private:
     model::term_id _term;
     absl::node_hash_map<model::topic_partition, offset_metadata>
       _pending_offset_commits;
-    absl::node_hash_map<int64_t, group_ongoing_tx> _ongoing_txs;
-    absl::flat_hash_map<model::producer_id, model::producer_epoch> _fence_pid_epoch;
+
+
+    /*
+    struct group_log_inflight_tx_tp_update {
+        model::topic_partition tp;
+        model::offset offset;
+        int32_t leader_epoch;
+        std::optional<ss::sstring> metadata;
+    };
+    */
+
+    struct volatile_offset {
+        model::offset offset;
+        int32_t leader_epoch;
+        std::optional<ss::sstring> metadata;
+    };
+
+    struct volatile_tx {
+        absl::node_hash_map<model::topic_partition, volatile_offset> offsets;
+    };
+
+    struct prepared_tx {
+        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
+    };
+
+    absl::node_hash_map<model::producer_identity, volatile_tx> _volatile_txs;
+    absl::node_hash_map<model::producer_identity, prepared_tx> _prepared_txs;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;
