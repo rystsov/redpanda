@@ -282,6 +282,7 @@ ss::future<> group_manager::recover_partition(
         group->reset_tx_state(term);
     }
     p->term = term;
+    p->fence_pid_epoch = std::move(ctx.fence_pid_epoch);
 
     for (auto& [group_id, group_stm] : ctx.groups) {
         if (group_stm.has_data()) {
@@ -398,8 +399,13 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
         group_it->second.commit(bid);
 
         return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
-    // } else if() {
-    // SHAI
+    } else if (batch.header().type == cluster::tx_fence_batch_type) {
+        auto bid = model::batch_identity::from(batch.header());
+        auto [fence_it, _] = st.fence_pid_epoch.try_emplace(bid.pid.get_id(), bid.pid.get_epoch());
+        if (bid.pid.get_epoch() >= fence_it->second) {
+            fence_it->second = bid.pid.get_epoch();
+        }
+        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
     } else {
         klog.trace("ignorning batch with type {}", int(batch.header().type));
         return ss::make_ready_future<ss::stop_iteration>(
@@ -693,7 +699,7 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
             co_return make_begin_tx_reply(cluster::tx_errc::not_coordinator);
         }
 
-        auto fence_it = partition->fence_pid_epoch.find(r.pid.get_id()); 
+        auto fence_it = partition->fence_pid_epoch.find(r.pid.get_id());
         if (fence_it == partition->fence_pid_epoch.end() || r.pid.get_epoch() > fence_it->second) {
             auto batch = cluster::make_fence_batch(fence_control_record_version, r.pid);  
             auto reader = model::make_memory_record_batch_reader(std::move(batch));

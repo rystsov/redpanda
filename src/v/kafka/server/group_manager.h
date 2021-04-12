@@ -302,6 +302,7 @@ struct group_log_record_key {
  */
 struct recovery_batch_consumer_state {
     absl::node_hash_map<kafka::group_id, group_stm> groups;
+    absl::flat_hash_map<model::producer_id, model::producer_epoch> fence_pid_epoch;
 };
 
 struct recovery_batch_consumer {
