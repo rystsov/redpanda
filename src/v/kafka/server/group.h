@@ -128,6 +128,7 @@ public:
     static constexpr model::control_record_version inflight_tx_record_version{0};
     static constexpr model::control_record_version commit_tx_record_version{0};
     static constexpr model::control_record_version fence_control_record_version{0};
+    static constexpr model::control_record_version aborted_tx_record_version{0};
 
     struct offset_metadata {
         model::offset log_offset;
@@ -140,6 +141,11 @@ public:
         model::producer_identity pid;
         kafka::group_id group_id;
         absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
+    };
+
+    struct aborted_tx {
+        kafka::group_id group_id;
+        model::tx_seq tx_seq;
     };
 
     group(
@@ -516,16 +522,6 @@ private:
     model::term_id _term;
     absl::node_hash_map<model::topic_partition, offset_metadata>
       _pending_offset_commits;
-
-
-    /*
-    struct group_log_inflight_tx_tp_update {
-        model::topic_partition tp;
-        model::offset offset;
-        int32_t leader_epoch;
-        std::optional<ss::sstring> metadata;
-    };
-    */
 
     struct volatile_offset {
         model::offset offset;

@@ -47,13 +47,13 @@ group_stm::apply(model::offset offset, group_log_inflight_tx val) {
 }
 
 void
-group_stm::commit(model::batch_identity bid) {
-    auto ongoing_it = _ongoing_txs.find(bid.pid.id);
+group_stm::commit(model::producer_identity pid) {
+    auto ongoing_it = _ongoing_txs.find(pid.id);
     if (ongoing_it == _ongoing_txs.end()) {
-        klog.warn("can't find ongoing tx {}", bid.pid);
+        klog.warn("can't find ongoing tx {}", pid);
         return;
-    } else if (ongoing_it->second.pid.epoch != bid.pid.epoch) {
-        klog.warn("a comitting tx {} doesn't match ongoing tx {}", bid.pid, ongoing_it->second.pid);
+    } else if (ongoing_it->second.pid.epoch != pid.epoch) {
+        klog.warn("a comitting tx {} doesn't match ongoing tx {}", pid, ongoing_it->second.pid);
         return;
     }
 
@@ -74,6 +74,17 @@ group_stm::commit(model::batch_identity bid) {
         _offsets[key] = std::make_pair(md.log_offset, std::move(val));
     }
 
+    _ongoing_txs.erase(ongoing_it);
+}
+
+void
+group_stm::abort(model::producer_identity pid, [[maybe_unused]] model::tx_seq tx_seq) {
+    auto ongoing_it = _ongoing_txs.find(pid.id);
+    if (ongoing_it == _ongoing_txs.end()) {
+        return;
+    } else if (ongoing_it->second.pid.epoch != pid.epoch) {
+        return;
+    }
     _ongoing_txs.erase(ongoing_it);
 }
 

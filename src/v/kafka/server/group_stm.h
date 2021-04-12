@@ -105,10 +105,12 @@ public:
         _is_loaded = false;
         _is_removed = true;
     }
+    
     void update_offset(group_log_offset_key, model::offset, group_log_offset_metadata&&);
     void remove_offset(group_log_offset_key);
     void apply(model::offset, group_log_inflight_tx);
-    void commit(model::batch_identity);
+    void commit(model::producer_identity);
+    void abort(model::producer_identity, model::tx_seq);
 
     bool has_data() {
         return !_is_removed && (_is_loaded || _offsets.size() > 0);
