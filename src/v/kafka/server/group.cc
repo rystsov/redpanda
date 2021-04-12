@@ -1348,7 +1348,6 @@ group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
     //   reply ok
     // else:
     //   reply timeout
-
     auto tx_it = _volatile_txs.find(r.pid);
     if (tx_it == _volatile_txs.end()) {
         co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
@@ -1369,6 +1368,7 @@ group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
         tx_entry.updates.push_back(tx_update);
     }
 
+    volatile_tx tx = tx_it->second;
     _volatile_txs.erase(tx_it);
 
     iobuf key;
@@ -1387,24 +1387,32 @@ group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
         co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
     }
 
-    prepared_tx tx;
-
-    for (const auto& [tp, offset] : tx_it->second.offsets) {
+    prepared_tx ptx;
+    for (const auto& [tp, offset] : tx.offsets) {
         offset_metadata md{
             .log_offset = e.value().last_offset,
             .offset = offset.offset,
             .metadata = offset.metadata.value_or("")
         };
-        tx.offsets[tp] = md;
+        ptx.offsets[tp] = md;
     }
-
-    _prepared_txs.try_emplace(r.pid, tx);
-
+    _prepared_txs.try_emplace(r.pid, ptx);
     co_return cluster::prepare_group_tx_reply();
 }
 
 ss::future<cluster::abort_group_tx_reply>
-group::abort_tx(cluster::abort_group_tx_request&&) {
+group::abort_tx(cluster::abort_group_tx_request&& r) {
+    
+    auto vtx_it = _volatile_txs.find(r.pid);
+    if (vtx_it != _volatile_txs.end()) {
+        _volatile_txs.erase(vtx_it);
+    }
+
+    auto ptx_it = _prepared_txs.find(r.pid);
+    if (ptx_it != _prepared_txs.end()) {
+        _prepared_txs.erase(ptx_it);
+    }
+    
     co_return cluster::abort_group_tx_reply();
 }
 
