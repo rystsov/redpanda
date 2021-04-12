@@ -1192,7 +1192,7 @@ void group::insert_ongoing(group_ongoing_tx tx) {
 }
 
 void
-group::reset_tx_state([[maybe_unused]] model::term_id term) {
+group::reset_tx_state(model::term_id term) {
     _term = term;
 //  state.ongoing = {}
 //  state.fenced = {}
@@ -1276,46 +1276,6 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
         co_return make_begin_tx_reply(cluster::tx_errc::timeout);
     }
 
-    auto fence_it = _fence_pid_epoch.find(r.pid.get_id()); 
-    if (fence_it == _fence_pid_epoch.end() || r.pid.get_epoch() > fence_it->second) {
-        auto batch = cluster::make_fence_batch(fence_control_record_version, r.pid);  
-        auto reader = model::make_memory_record_batch_reader(std::move(batch));
-        auto e = co_await _partition->replicate(_term, std::move(reader), raft::replicate_options(raft::consistency_level::quorum_ack));
-
-        if (!e) {
-            vlog(
-              klog.error,
-              "Error \"{}\" on replicating pid:{} fencing batch",
-              e.error(),
-              r.pid);
-            cluster::begin_group_tx_reply reply;
-            reply.ec = cluster::tx_errc::timeout;
-            co_return reply;
-        }
-
-        fence_it = _fence_pid_epoch.find(r.pid.get_id());
-    }
-
-    // if req.pid.epoch < state.fenced[req.pid.id].epoch
-    //   reply fenced
-    // if req.pid.epoch <= state.ongoing[req.pid.id].pid.epoch:
-    //   client will bump epoch and get another greater that ongoing
-    //   reply fenced
-    if (fence_it == _fence_pid_epoch.end()) {
-        _fence_pid_epoch.emplace(r.pid.get_id(), r.pid.get_epoch());
-    } else if (r.pid.get_epoch() > fence_it->second) {
-        fence_it->second = r.pid.get_epoch();
-    } else {
-        vlog(
-          klog.error,
-          "pid {} fenced out by epoch {}",
-          r.pid,
-          fence_it->second);
-        cluster::begin_group_tx_reply reply;
-        reply.ec = cluster::tx_errc::fenced;
-        co_return reply;
-    }
-
     // if req.pid in state.expecting:
     //   // TODO: add GC
     //   reply fenced
@@ -1338,6 +1298,7 @@ group::begin_tx(cluster::begin_group_tx_request&& r) {
 
     cluster::begin_group_tx_reply reply;
     reply.etag = _term;
+    reply.ec = cluster::tx_errc::none;
     co_return reply;
 }
 
@@ -1347,13 +1308,11 @@ group::prepare_tx([[maybe_unused]] cluster::prepare_group_tx_request&& r) {
         co_return make_prepare_tx_reply(cluster::tx_errc::timeout);
     }
     
-    vlog(klog.info, "SHAI: PREPARE GROUP TX");
     co_return cluster::prepare_group_tx_reply();
 }
 
 ss::future<cluster::abort_group_tx_reply>
 group::abort_tx(cluster::abort_group_tx_request&&) {
-    vlog(klog.info, "SHAI: ABORT GROUP TX");
     co_return cluster::abort_group_tx_reply();
 }
 

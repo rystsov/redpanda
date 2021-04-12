@@ -192,6 +192,8 @@ private:
         ss::semaphore sem{1};
         ss::abort_source as;
         ss::lw_shared_ptr<cluster::partition> partition;
+        model::term_id term{-1};
+        absl::flat_hash_map<model::producer_id, model::producer_epoch> fence_pid_epoch;
 
         explicit attached_partition(ss::lw_shared_ptr<cluster::partition> p)
           : loading(true)
@@ -257,7 +259,7 @@ private:
       std::optional<model::node_id> leader_id);
 
     ss::future<> recover_partition(
-      model::term_id, ss ::lw_shared_ptr<cluster::partition>, recovery_batch_consumer_state);
+      model::term_id, ss::lw_shared_ptr<attached_partition>, recovery_batch_consumer_state);
 
     ss::future<> inject_noop(
       ss::lw_shared_ptr<cluster::partition> p,
@@ -268,14 +270,6 @@ private:
     ss::sharded<cluster::topic_table>& _topic_table;
     config::configuration& _conf;
     absl::node_hash_map<group_id, group_ptr> _groups;
-    
-    struct group_partition {
-        model::term_id term;
-        ss::lw_shared_ptr<attached_partition> partition;
-        absl::flat_hash_map<model::producer_id, model::producer_epoch> fence_pid_epoch;
-    };
-
-    absl::flat_hash_map<model::ntp, group_partition> _partitions2;
     absl::node_hash_map<model::ntp, ss::lw_shared_ptr<attached_partition>> _partitions;
     // 
     
