@@ -173,7 +173,7 @@ public class StreamBench extends Consts
     public static void main( String[] args ) throws Exception
     {
         var bench = new StreamBench(getConnection(), "topic1", "topic2");
-        long offset = bench.fillSource(1000);
+        long offset = bench.fillSource(2*getTxes(200));
         bench.initProducer("my-tx-1");
         
         bench.initConsumer("groupId");
@@ -183,7 +183,7 @@ public class StreamBench extends Consts
         
         bench.initConsumer("groupId");
         bench.setGroupStartOffset(offset);
-        bench.measure(200, 10);
+        bench.measure(getTxes(200), 10);
         bench.consumer.close();
     }
 }

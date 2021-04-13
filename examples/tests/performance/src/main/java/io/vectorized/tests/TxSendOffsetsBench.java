@@ -153,7 +153,7 @@ public class TxSendOffsetsBench extends Consts
         bench.consumer.close();
         
         bench.initConsumer("groupId");
-        bench.measure(200);
+        bench.measure(getTxes(200));
         bench.consumer.close();
     }
 }

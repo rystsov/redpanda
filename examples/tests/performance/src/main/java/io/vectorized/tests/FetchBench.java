@@ -120,6 +120,6 @@ public class FetchBench extends Consts
         var bench = new FetchBench(getConnection(), "topic1");
         bench.initProducer("my-tx-1");
         bench.initConsumer();
-        bench.write(1000);
+        bench.write(getTxes(1000));
     }
 }

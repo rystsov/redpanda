@@ -69,6 +69,6 @@ public class TxSendBench extends Consts
     {
         var bench = new TxSendBench(getConnection(), "my-tx-1");
         bench.warmup("topic1", "topic2", 100);
-        bench.measure("topic1", "topic2", 1000);
+        bench.measure("topic1", "topic2", getTxes(1000));
     }
 }
