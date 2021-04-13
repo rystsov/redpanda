@@ -54,7 +54,10 @@ tx_gateway::abort_tx(abort_tx_request&& request, rpc::streaming_context&) {
 
 ss::future<begin_group_tx_reply>
 tx_gateway::begin_group_tx(begin_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
-    return _tx_gateway_frontend.local().do_begin_group_tx(request.group_id, request.pid, request.timeout);
+    //vlog(clusterlog.info, "SHAI(10): gateway:begin_group_tx");
+    auto reply = co_await _tx_gateway_frontend.local().do_begin_group_tx(request.group_id, request.pid, request.timeout);
+    //vlog(clusterlog.info, "SHAI(11): gateway:begin_group_tx {}", reply.ec);
+    co_return reply;
 };
 
 ss::future<prepare_group_tx_reply>

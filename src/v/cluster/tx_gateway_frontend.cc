@@ -186,6 +186,7 @@ tx_gateway_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::p
 
 ss::future<begin_group_tx_reply>
 tx_gateway_frontend::begin_group_tx(kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    // vlog(clusterlog.info, "SHAI(4): begin_group_tx");
     auto ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
     if (!ntp_opt) {
         vlog(clusterlog.warn, "can't find ntp for {}, creating a consumer group topic", group_id);
@@ -196,38 +197,46 @@ tx_gateway_frontend::begin_group_tx(kafka::group_id group_id, model::producer_id
                 .ec = tx_errc::partition_not_exists
             };
         }
-        
+    }
+
+    auto retries = _metadata_dissemination_retries;
+    auto delay_ms = _metadata_dissemination_retry_delay_ms;
+    std::optional<model::node_id> leader_opt = std::nullopt;
+    tx_errc ec;
+    while (!leader_opt && 0 < retries--) {
+        // vlog(clusterlog.info, "SHAI(5): RETRY: {}", retries);
         ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
-        auto retries = _metadata_dissemination_retries;
-        auto delay_ms = _metadata_dissemination_retry_delay_ms;
-        while (!ntp_opt && 0 < retries--) {
-            co_await ss::sleep(delay_ms);
-            ntp_opt = _coordinator_mapper.local().ntp_for(group_id);
-        }
         if (!ntp_opt) {
-            vlog(clusterlog.warn, "can't find ntp for {} after {} retries", group_id, _metadata_dissemination_retries);
-            co_return begin_group_tx_reply {
-                .ec = tx_errc::partition_not_exists
-            };
+            vlog(clusterlog.warn, "can't find ntp for {}, retrying", group_id);
+            ec = tx_errc::partition_not_exists;
+            co_await ss::sleep(delay_ms);
+            continue;
+        }
+
+        auto ntp = ntp_opt.value();
+        auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+        if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+            vlog(clusterlog.info, "can't find meta info for {}, retrying", ntp);
+            ec = tx_errc::partition_not_exists;
+            co_await ss::sleep(delay_ms);
+            continue;
+        }
+
+        leader_opt = _leaders.local().get_leader(ntp);
+        if (!leader_opt) {
+            vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+            ec = tx_errc::leader_not_found;
+            co_await ss::sleep(delay_ms);
         }
     }
-    auto ntp = ntp_opt.value();
 
-    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
-    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
-        vlog(clusterlog.info, "can' find meta info for {}", ntp);
-        co_return begin_group_tx_reply {
-            .ec = tx_errc::partition_not_exists
-        };
-    }
-
-    auto leader_opt = _leaders.local().get_leader(ntp);
     if (!leader_opt) {
-        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        // vlog(clusterlog.info, "SHAI(6): ERROR {}", ec);
         co_return begin_group_tx_reply {
-            .ec = tx_errc::leader_not_found
+            .ec = ec
         };
     }
+    
     auto leader = leader_opt.value();
     auto _self = _controller->self();
 
@@ -272,23 +281,13 @@ tx_gateway_frontend::dispatch_begin_group_tx(model::node_id leader, kafka::group
 
 ss::future<begin_group_tx_reply>
 tx_gateway_frontend::do_begin_group_tx(kafka::group_id group_id, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    // vlog(clusterlog.info, "SHAI(5): do_begin_group_tx");
+
     begin_group_tx_request req;
     req.group_id = group_id;
     req.pid = pid;
     req.timeout = timeout;
-
-    auto reply = co_await _group_router.local().begin_tx(std::move(req));
-
-    if (reply.ec == tx_errc::not_coordinator) {
-        auto retries = _metadata_dissemination_retries;
-        auto delay_ms = _metadata_dissemination_retry_delay_ms;
-        while (reply.ec == tx_errc::not_coordinator && 0 < retries--) {
-            co_await ss::sleep(delay_ms);
-            reply = co_await _group_router.local().begin_tx(std::move(req));
-        }
-    }
-
-    co_return reply;
+    co_return co_await _group_router.local().begin_tx(std::move(req));
 }
 
 ss::future<prepare_group_tx_reply>
@@ -1316,6 +1315,7 @@ tx_gateway_frontend::add_partition_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add
 
 ss::future<kafka::add_offsets_to_txn_response_data>
 tx_gateway_frontend::add_offsets_to_tx(kafka::add_offsets_to_txn_request_data request, model::timeout_clock::duration timeout) {
+    // vlog(clusterlog.info, "SHAI(0): add_offsets_to_tx");
     auto shard = _shard_table.local().shard_for(model::kafka_tx_ntp);
 
     if (shard == std::nullopt) {
@@ -1348,6 +1348,7 @@ tx_gateway_frontend::add_offsets_to_tx(kafka::add_offsets_to_txn_request_data re
 
           auto maybe_tx = stm->get_tx(request.transactional_id);
           if (!maybe_tx) {
+              //vlog(clusterlog.info, "SHAI(1): no tx");
               // todo: use sane error code
               return ss::make_ready_future<kafka::add_offsets_to_txn_response_data>(kafka::add_offsets_to_txn_response_data {
                   .error_code = kafka::error_code::unknown_server_error
@@ -1364,6 +1365,7 @@ tx_gateway_frontend::add_offsets_to_tx(kafka::add_offsets_to_txn_request_data re
 
 ss::future<kafka::add_offsets_to_txn_response_data>
 tx_gateway_frontend::add_offsets_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add_offsets_to_txn_request_data request, model::timeout_clock::duration timeout) {
+    //vlog(clusterlog.info, "SHAI(2): add_offsets_to_tx");
     model::producer_identity pid {
         .id = request.producer_id,
         .epoch = request.producer_epoch
@@ -1371,6 +1373,7 @@ tx_gateway_frontend::add_offsets_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add_o
 
     auto tx_opt = co_await get_tx(stm, pid, request.transactional_id, timeout);
     if (!tx_opt.has_value()) {
+        //vlog(clusterlog.info, "SHAI(3): no tx_opt");
         co_return kafka::add_offsets_to_txn_response_data {
             .error_code = kafka::error_code::unknown_server_error
         };
@@ -1378,9 +1381,15 @@ tx_gateway_frontend::add_offsets_to_tx(ss::shared_ptr<tm_stm>& stm, kafka::add_o
 
     auto group_info = co_await begin_group_tx(request.group_id, pid, timeout);
     if (group_info.ec != tx_errc::none) {
+        auto ec = kafka::error_code::unknown_server_error;
+        if (group_info.ec == tx_errc::not_coordinator) {
+            ec = kafka::error_code::not_coordinator;
+        } else if (group_info.ec == tx_errc::coordinator_load_in_progress) {
+            ec = kafka::error_code::coordinator_load_in_progress;
+        }
         vlog(clusterlog.warn, "error on begining group tx: {}", group_info.ec);
         co_return kafka::add_offsets_to_txn_response_data {
-            .error_code = kafka::error_code::unknown_server_error
+            .error_code = ec
         };
     }
     

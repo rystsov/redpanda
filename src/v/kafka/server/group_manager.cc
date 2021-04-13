@@ -655,42 +655,65 @@ group_manager::leave_group(leave_group_request&& r) {
 
 ss::future<txn_offset_commit_response>
 group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
-    // wrap in take mutex, most time handle_txn_offset_commit is in memory
-    auto error = validate_group_status(
-      r.ntp, r.data.group_id, offset_commit_api::key);
-    if (error != error_code::none) {
-        co_return txn_offset_commit_response(r, error);
+    if (!_catchup_lock.take_reader_lock()) {
+        vlog(klog.warn, "can't process a tx: coordinator_load_in_progress");
+        co_return txn_offset_commit_response(r, error_code::coordinator_load_in_progress);
     }
 
-    auto group = get_group(r.data.group_id);
-    if (!group) {
-        // <kafka>the group is not relying on Kafka for group management, so
-        // allow the commit</kafka>
-        auto p = _partitions.find(r.ntp)->second->partition;
-        group = ss::make_lw_shared<kafka::group>(
-          r.data.group_id, group_state::empty, _conf, p);
-        _groups.emplace(r.data.group_id, group);
-        _groups.rehash(0);
+    try {
+        auto error = validate_group_status(r.ntp, r.data.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
+            co_return txn_offset_commit_response(r, error);
+        }
+
+        auto group = get_group(r.data.group_id);
+        if (!group) {
+            // <kafka>the group is not relying on Kafka for group management, so
+            // allow the commit</kafka>
+            auto p = _partitions.find(r.ntp)->second->partition;
+            group = ss::make_lw_shared<kafka::group>(
+            r.data.group_id, group_state::empty, _conf, p);
+            _groups.emplace(r.data.group_id, group);
+            _groups.rehash(0);
+        }
+        
+        auto reply = co_await group->handle_txn_offset_commit(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
     }
-    
-    // pass last term
-    co_return co_await group->handle_txn_offset_commit(std::move(r));
 }
 
 ss::future<mark_group_committed_result>
 group_manager::mark_group_committed(mark_group_committed_request&& r) {
-    auto error = validate_group_status(
-      r.ntp, r.data.group_id, offset_commit_api::key);
-    if (error != error_code::none) {
-        co_return mark_group_committed_result(r, error);
+    if (!_catchup_lock.take_reader_lock()) {
+        vlog(klog.warn, "can't process a tx: coordinator_load_in_progress");
+        co_return mark_group_committed_result(r, error_code::coordinator_load_in_progress);
     }
 
-    auto group = get_group(r.data.group_id);
-    if (!group) {
-        co_return mark_group_committed_result(r, error_code::unknown_server_error);
-    }
+    try {
+        auto error = validate_group_status(r.ntp, r.data.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
+            co_return mark_group_committed_result(r, error);
+        }
 
-    co_return co_await group->handle_mark_group_committed(std::move(r));
+        auto group = get_group(r.data.group_id);
+        if (!group) {
+            _catchup_lock.release_reader_lock();
+            co_return mark_group_committed_result(r, error_code::unknown_server_error);
+        }
+
+        auto reply = co_await group->handle_mark_group_committed(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
+    }
 }
 
 static cluster::begin_group_tx_reply make_begin_tx_reply(cluster::tx_errc ec) {
@@ -701,6 +724,7 @@ static cluster::begin_group_tx_reply make_begin_tx_reply(cluster::tx_errc ec) {
 
 ss::future<cluster::begin_group_tx_reply>
 group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
+    // vlog(klog.info, "SHAI(6): begin_tx");
     if (!_catchup_lock.take_reader_lock()) {
         vlog(klog.warn, "can't process a tx: coordinator_load_in_progress");
         co_return make_begin_tx_reply(cluster::tx_errc::coordinator_load_in_progress);
@@ -710,6 +734,8 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
         auto error = validate_group_status(
           r.ntp, r.group_id, offset_commit_api::key);
         if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
+            // vlog(klog.info, "SHAI(20): {}", error);
             if (error == error_code::not_coordinator) {
                 co_return make_begin_tx_reply(cluster::tx_errc::not_coordinator);
             } else {
@@ -720,6 +746,8 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
         auto partition = _partitions.find(r.ntp)->second;
 
         if (partition->partition->term() != partition->term) {
+            // vlog(klog.info, "SHAI(21): term mismatch");
+            _catchup_lock.release_reader_lock();
             co_return make_begin_tx_reply(cluster::tx_errc::not_coordinator);
         }
 
@@ -738,6 +766,7 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
                     "Error \"{}\" on replicating pid:{} fencing batch",
                     e.error(),
                     r.pid);
+                _catchup_lock.release_reader_lock();
                 co_return make_begin_tx_reply(cluster::tx_errc::timeout);
             }
 
@@ -754,6 +783,7 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
                 "pid {} fenced out by epoch {}",
                 r.pid,
                 fence_it->second);
+            _catchup_lock.release_reader_lock();
             co_return make_begin_tx_reply(cluster::tx_errc::fenced);
         }
 
@@ -790,6 +820,7 @@ group_manager::prepare_tx(cluster::prepare_group_tx_request&& r) {
         auto error = validate_group_status(
           r.ntp, r.group_id, offset_commit_api::key);
         if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
             cluster::prepare_group_tx_reply reply;
             if (error == error_code::not_coordinator) {
                 reply.ec = cluster::tx_errc::not_coordinator;
@@ -801,6 +832,7 @@ group_manager::prepare_tx(cluster::prepare_group_tx_request&& r) {
 
         auto group = get_group(r.group_id);
         if (!group) {
+            _catchup_lock.release_reader_lock();
             cluster::prepare_group_tx_reply reply;
             reply.ec = cluster::tx_errc::timeout;
             co_return reply;
@@ -829,6 +861,7 @@ group_manager::abort_tx(cluster::abort_group_tx_request&& r) {
         auto error = validate_group_status(
           r.ntp, r.group_id, offset_commit_api::key);
         if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
             cluster::abort_group_tx_reply reply;
             if (error == error_code::not_coordinator) {
                 reply.ec = cluster::tx_errc::not_coordinator;
@@ -840,6 +873,7 @@ group_manager::abort_tx(cluster::abort_group_tx_request&& r) {
 
         auto group = get_group(r.group_id);
         if (!group) {
+            _catchup_lock.release_reader_lock();
             cluster::abort_group_tx_reply reply;
             reply.ec = cluster::tx_errc::timeout;
             co_return reply;
