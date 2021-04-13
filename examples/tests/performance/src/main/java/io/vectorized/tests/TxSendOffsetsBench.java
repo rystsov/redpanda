@@ -93,6 +93,8 @@ public class TxSendOffsetsBench extends Consts
         int count = 0;
         
         long[] measures = new long[iterations];
+        long[] send = new long[iterations];
+        long[] commit = new long[iterations];
         long min = Long.MAX_VALUE;
         long max = Long.MIN_VALUE;
         long started = System.nanoTime();
@@ -102,8 +104,15 @@ public class TxSendOffsetsBench extends Consts
             producer.beginTransaction();
             Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
             offsets.put(tp, new OffsetAndMetadata(0));
+            
+            long send_started = System.nanoTime();
             producer.sendOffsetsToTransaction(offsets, groupId);
+            send[i] = System.nanoTime() - send_started;
+
+            long commit_started = System.nanoTime();
             producer.commitTransaction();
+            commit[i] = System.nanoTime() - commit_started;
+            
             long tx_elapsed = System.nanoTime() - tx_started;
             min = Math.min(min, tx_elapsed);
             max = Math.max(max, tx_elapsed);
@@ -112,10 +121,26 @@ public class TxSendOffsetsBench extends Consts
         
         long elapsed = System.nanoTime() - started;
         System.out.println("measured " + iterations + " txes in " + elapsed + "ns");
-        System.out.println("min: " + min + "ns");
-        System.out.println("max: " + max + "ns");
         Arrays.sort(measures);
-        System.out.println("median: " + measures[measures.length / 2] + "ns");
+        System.out.println("= txes ======");
+        System.out.println("min: " + measures[0] + "ns");
+        System.out.println("p50: " + measures[measures.length / 2] + "ns");
+        System.out.println("p99: " + measures[(int)(measures.length * 0.99)] + "ns");
+        System.out.println("max: " + measures[measures.length-1] + "ns");
+
+        Arrays.sort(send);
+        System.out.println("= send ======");
+        System.out.println("min: " + send[0] + "ns");
+        System.out.println("p50: " + send[measures.length / 2] + "ns");
+        System.out.println("p99: " + send[(int)(measures.length * 0.99)] + "ns");
+        System.out.println("max: " + send[measures.length-1] + "ns");
+
+        Arrays.sort(commit);
+        System.out.println("= commit ======");
+        System.out.println("min: " + commit[0] + "ns");
+        System.out.println("p50: " + commit[measures.length / 2] + "ns");
+        System.out.println("p99: " + commit[(int)(measures.length * 0.99)] + "ns");
+        System.out.println("max: " + commit[measures.length-1] + "ns");
     }
 
     public static void main( String[] args ) throws Exception

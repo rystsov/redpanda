@@ -163,10 +163,11 @@ public class StreamBench extends Consts
         }
         long elapsed = System.nanoTime() - started;
         System.out.println("measured " + iterations + " txes in " + elapsed + "ns");
-        System.out.println("min: " + min + "ns");
-        System.out.println("max: " + max + "ns");
         Arrays.sort(measures);
-        System.out.println("median: " + measures[measures.length / 2] + "ns");
+        System.out.println("min: " + min + "ns");
+        System.out.println("p50: " + measures[measures.length / 2] + "ns");
+        System.out.println("p99: " + measures[(int)(measures.length * 0.99)] + "ns");
+        System.out.println("max: " + max + "ns");
     }
 
     public static void main( String[] args ) throws Exception
