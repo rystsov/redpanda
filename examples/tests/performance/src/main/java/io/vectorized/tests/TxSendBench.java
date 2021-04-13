@@ -8,7 +8,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
-public class TxSendBench 
+public class TxSendBench extends Consts 
 {
     public Producer<String, String> producer;
 
@@ -66,7 +66,7 @@ public class TxSendBench
 
     public static void main( String[] args ) throws Exception
     {
-        var bench = new TxSendBench("127.0.0.1:9092", "my-tx-1");
+        var bench = new TxSendBench(getConnection(), "my-tx-1");
         bench.warmup("topic1", "topic2", 100);
         bench.measure("topic1", "topic2", 1000);
     }

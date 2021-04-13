@@ -22,7 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-public class FetchBench 
+public class FetchBench extends Consts 
 {
     String connection;
 
@@ -116,7 +116,7 @@ public class FetchBench
 
     public static void main( String[] args ) throws Exception
     {
-        var bench = new FetchBench("127.0.0.1:9092", "topic1");
+        var bench = new FetchBench(getConnection(), "topic1");
         bench.initProducer("my-tx-1");
         bench.initConsumer();
         bench.write(1000);

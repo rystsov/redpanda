@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-public class TxSendOffsetsBench 
+public class TxSendOffsetsBench extends Consts 
 {
     String connection;
 
@@ -120,7 +120,7 @@ public class TxSendOffsetsBench
 
     public static void main( String[] args ) throws Exception
     {
-        var bench = new TxSendOffsetsBench("127.0.0.1:9092", "topic1");
+        var bench = new TxSendOffsetsBench(getConnection(), "topic1");
         bench.initProducer("my-tx-1");
         
         bench.initConsumer("groupId");

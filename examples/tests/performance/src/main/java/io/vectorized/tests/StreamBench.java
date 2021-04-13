@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-public class StreamBench 
+public class StreamBench extends Consts 
 {
     String connection;
 
@@ -171,7 +171,7 @@ public class StreamBench
 
     public static void main( String[] args ) throws Exception
     {
-        var bench = new StreamBench("127.0.0.1:9092", "topic1", "topic2");
+        var bench = new StreamBench(getConnection(), "topic1", "topic2");
         long offset = bench.fillSource(1000);
         bench.initProducer("my-tx-1");
         

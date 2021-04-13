@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-public class BatchBench 
+public class BatchBench extends Consts 
 {
     String connection;
     String topic;
@@ -72,7 +72,7 @@ public class BatchBench
             System.out.println("BatchBench num of messages (e.g. 200000), max in flight requests (e.g. 1), batch size (e.g. 1384)");
             return;
         } 
-        var bench = new BatchBench("127.0.0.1:9092", "topic1");
+        var bench = new BatchBench(getConnection(), "topic1");
         bench.initProducer("my-tx-1", inFlight, batchSize);
         bench.measure(messages);
     }
