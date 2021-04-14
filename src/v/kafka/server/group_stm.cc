@@ -77,6 +77,17 @@ group_stm::commit(model::producer_identity pid) {
     _prepared_txs.erase(prepared_it);
 }
 
+void
+group_stm::abort(model::producer_identity pid, [[maybe_unused]] model::tx_seq tx_seq) {
+    auto prepared_it = _prepared_txs.find(pid.id);
+    if (prepared_it == _prepared_txs.end()) {
+        return;
+    } else if (prepared_it->second.pid.epoch != pid.epoch) {
+        return;
+    }
+    _prepared_txs.erase(prepared_it);
+}
+
 std::ostream& operator<<(std::ostream& os, const group_log_offset_key& key) {
     fmt::print(
       os,

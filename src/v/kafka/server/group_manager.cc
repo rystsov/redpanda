@@ -374,15 +374,12 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
 
         return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
     } else if (batch.header().type == cluster::group_commit_tx_batch_type) {
-        vassert(batch.record_count() == 1, "prepare batch must contain a single record");
+        vassert(batch.record_count() == 1, "commit batch must contain a single record");
         auto r = batch.copy_records();
         auto& record = *r.begin();
         auto key_buf = record.release_key();
         kafka::request_reader buf_reader(std::move(key_buf));
         auto version = model::control_record_version(buf_reader.read_int16());
-
-        const auto& hdr = batch.header();
-        auto bid = model::batch_identity::from(hdr);
 
         vassert(
           version == group::commit_tx_record_version,
@@ -390,11 +387,38 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
           version,
           group::commit_tx_record_version);
         
+        const auto& hdr = batch.header();
+        auto bid = model::batch_identity::from(hdr);
+
         auto val_buf = record.release_value();
         auto val = reflection::from_iobuf<group_log_commit_tx>(std::move(val_buf));
         
         auto [group_it, _] = st.groups.try_emplace(val.group_id, group_stm());
         group_it->second.commit(bid.pid);
+
+        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+    } else if (batch.header().type == cluster::group_abort_tx_batch_type) {
+        vassert(batch.record_count() == 1, "abort batch must contain a single record");
+        auto r = batch.copy_records();
+        auto& record = *r.begin();
+        auto key_buf = record.release_key();
+        kafka::request_reader buf_reader(std::move(key_buf));
+        auto version = model::control_record_version(buf_reader.read_int16());
+
+        vassert(
+          version == group::aborted_tx_record_version,
+          "unknown group abort tx record version: {} expected: {}",
+          version,
+          group::aborted_tx_record_version);
+        
+        const auto& hdr = batch.header();
+        auto bid = model::batch_identity::from(hdr);
+        
+        auto val_buf = record.release_value();
+        auto val = reflection::from_iobuf<group::aborted_tx>(std::move(val_buf));
+
+        auto [group_it, _] = st.groups.try_emplace(val.group_id, group_stm());
+        group_it->second.abort(bid.pid, val.tx_seq);
 
         return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
     } else if (batch.header().type == cluster::tx_fence_batch_type) {
@@ -819,6 +843,47 @@ group_manager::prepare_tx(cluster::prepare_group_tx_request&& r) {
 
         // pass last term
         auto reply = co_await group->handle_prepare_tx(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
+    }
+}
+
+ss::future<cluster::abort_group_tx_reply>
+group_manager::abort_tx(cluster::abort_group_tx_request&& r) {
+    if (!_catchup_lock.take_reader_lock()) {
+        cluster::abort_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::coordinator_load_in_progress;
+        co_return reply;
+    }
+
+    try {
+        // wrap in take mutex, most time begin_tx is in memory
+        auto error = validate_group_status(
+          r.ntp, r.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
+            cluster::abort_group_tx_reply reply;
+            if (error == error_code::not_coordinator) {
+                reply.ec = cluster::tx_errc::not_coordinator;
+            } else {
+                reply.ec = cluster::tx_errc::timeout;
+            }
+            co_return reply;
+        }
+
+        auto group = get_group(r.group_id);
+        if (!group) {
+            _catchup_lock.release_reader_lock();
+            cluster::abort_group_tx_reply reply;
+            reply.ec = cluster::tx_errc::timeout;
+            co_return reply;
+        }
+
+        // pass last term
+        auto reply = co_await group->handle_abort_tx(std::move(r));
         _catchup_lock.release_reader_lock();
         co_return reply;
     } catch(...) {
