@@ -48,7 +48,9 @@ set(schemata
   create_acls_request.json
   create_acls_response.json
   delete_acls_request.json
-  delete_acls_response.json)
+  delete_acls_response.json
+  txn_offset_commit_request.json
+  txn_offset_commit_response.json)
 
 set(srcs)
 foreach(schema ${schemata})
