@@ -103,6 +103,8 @@ public:
     using clock_type = ss::lowres_clock;
     using duration_type = clock_type::duration;
 
+    static constexpr model::control_record_version fence_control_record_version{0};
+
     struct offset_metadata {
         model::offset log_offset;
         model::offset offset;
@@ -397,12 +399,17 @@ public:
 
     void reset_tx_state(model::term_id);
 
+    ss::future<cluster::begin_group_tx_reply> begin_tx(cluster::begin_group_tx_request&&);
+
     ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
     
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
 
     ss::future<txn_offset_commit_response>
     handle_txn_offset_commit(txn_offset_commit_request&& r);
+
+    ss::future<cluster::begin_group_tx_reply>
+    handle_begin_tx(cluster::begin_group_tx_request&& r);
     
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);
