@@ -310,6 +310,10 @@ ss::future<> group_manager::recover_partition(
             group = ss::make_lw_shared<kafka::group>(group_id, group_state::empty, _conf, p->partition);
         }
         _groups.emplace(group_id, group);
+
+        for (const auto& [_, tx] : group_stm.prepared_txs()) {            
+            group->insert_prepared(tx);
+        }
     }
 
     /*
@@ -348,6 +352,27 @@ recovery_batch_consumer::operator()(model::record_batch batch) {
                     });
                 })
           .then([] { return ss::stop_iteration::no; });
+    } else if (batch.header().type == cluster::group_prepare_tx_batch_type) {
+        vassert(batch.record_count() == 1, "prepare batch must contain a single record");
+        auto r = batch.copy_records();
+        auto& record = *r.begin();
+        auto key_buf = record.release_key();
+        kafka::request_reader buf_reader(std::move(key_buf));
+        auto version = model::control_record_version(buf_reader.read_int16());
+
+        vassert(
+          version == group::prepared_tx_record_version,
+          "unknown group prepared tx record version: {} expected: {}",
+          version,
+          group::prepared_tx_record_version);
+
+        auto val_buf = record.release_value();
+        auto val = reflection::from_iobuf<group_log_prepared_tx>(std::move(val_buf));
+        
+        auto [group_it, _] = st.groups.try_emplace(val.group_id, group_stm());
+        group_it->second.update_prepared(batch.last_offset(), val);
+
+        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
     } else if (batch.header().type == cluster::tx_fence_batch_type) {
         auto bid = model::batch_identity::from(batch.header());
         auto [fence_it, _] = st.fence_pid_epoch.try_emplace(bid.pid.get_id(), bid.pid.get_epoch());
@@ -692,6 +717,45 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
         }
 
         auto reply = co_await group->handle_begin_tx(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
+    }
+}
+
+ss::future<cluster::prepare_group_tx_reply>
+group_manager::prepare_tx(cluster::prepare_group_tx_request&& r) {
+    if (!_catchup_lock.take_reader_lock()) {
+        cluster::prepare_group_tx_reply reply;
+        reply.ec = cluster::tx_errc::coordinator_load_in_progress;
+        co_return reply;
+    }
+
+    try {
+        // wrap in take mutex, most time begin_tx is in memory
+        auto error = validate_group_status(
+          r.ntp, r.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            cluster::prepare_group_tx_reply reply;
+            if (error == error_code::not_coordinator) {
+                reply.ec = cluster::tx_errc::not_coordinator;
+            } else {
+                reply.ec = cluster::tx_errc::timeout;
+            }
+            co_return reply;
+        }
+
+        auto group = get_group(r.group_id);
+        if (!group) {
+            cluster::prepare_group_tx_reply reply;
+            reply.ec = cluster::tx_errc::timeout;
+            co_return reply;
+        }
+
+        // pass last term
+        auto reply = co_await group->handle_prepare_tx(std::move(r));
         _catchup_lock.release_reader_lock();
         co_return reply;
     } catch(...) {

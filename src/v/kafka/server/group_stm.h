@@ -62,6 +62,20 @@ struct group_log_offset_metadata {
     operator<<(std::ostream&, const group_log_offset_metadata&);
 };
 
+struct group_log_prepared_tx_offset {
+    model::topic_partition tp;
+    model::offset offset;
+    int32_t leader_epoch;
+    std::optional<ss::sstring> metadata;
+};
+
+struct group_log_prepared_tx {
+    kafka::group_id group_id;
+    // TODO: get rid of pid, we have it in the headers
+    model::producer_identity pid;
+    std::vector<group_log_prepared_tx_offset> offsets;
+};
+
 } // namespace kafka
 
 namespace std {
@@ -89,16 +103,23 @@ public:
     }
     void update_offset(group_log_offset_key, model::offset, group_log_offset_metadata&&);
     void remove_offset(group_log_offset_key);
+    void update_prepared(model::offset, group_log_prepared_tx);
 
     bool has_data() {
         return !_is_removed && (_is_loaded || _offsets.size() > 0);
     }
+    
     bool is_removed() {
         return _is_removed;
     }
 
+    absl::node_hash_map<int64_t, group::group_prepared_tx>& prepared_txs() {
+        return this->_prepared_txs;
+    }
+
     absl::node_hash_map<group_log_offset_key, std::pair<model::offset, group_log_offset_metadata>> _offsets;
 private:
+    absl::node_hash_map<int64_t, group::group_prepared_tx> _prepared_txs;
     group_log_group_metadata _metadata;
     bool _is_loaded {false};
     bool _is_removed {false};

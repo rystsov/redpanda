@@ -104,12 +104,19 @@ public:
     using duration_type = clock_type::duration;
 
     static constexpr model::control_record_version fence_control_record_version{0};
+    static constexpr model::control_record_version prepared_tx_record_version{0};
 
     struct offset_metadata {
         model::offset log_offset;
         model::offset offset;
         ss::sstring metadata;
         // TODO support leader_epoch
+    };
+
+    struct group_prepared_tx {
+        model::producer_identity pid;
+        kafka::group_id group_id;
+        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
     };
 
     group(
@@ -401,6 +408,8 @@ public:
 
     ss::future<cluster::begin_group_tx_reply> begin_tx(cluster::begin_group_tx_request&&);
 
+    ss::future<cluster::prepare_group_tx_reply> prepare_tx(cluster::prepare_group_tx_request&&);
+
     ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
     
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
@@ -410,6 +419,9 @@ public:
 
     ss::future<cluster::begin_group_tx_reply>
     handle_begin_tx(cluster::begin_group_tx_request&& r);
+
+    ss::future<cluster::prepare_group_tx_reply>
+    handle_prepare_tx(cluster::prepare_group_tx_request&& r);
     
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);
@@ -429,6 +441,8 @@ public:
         }
         return inserted;
     }
+
+    void insert_prepared(group_prepared_tx);
 
     // helper for the kafka api: describe groups
     described_group describe() const;
@@ -480,7 +494,12 @@ private:
         absl::node_hash_map<model::topic_partition, volatile_offset> offsets;
     };
 
+    struct prepared_tx {
+        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
+    };
+
     absl::node_hash_map<model::producer_identity, volatile_tx> _volatile_txs;
+    absl::node_hash_map<model::producer_identity, prepared_tx> _prepared_txs;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;
