@@ -1179,13 +1179,44 @@ group::reset_tx_state(model::term_id term) {
     _term = term;
 }
 
+ss::future<txn_offset_commit_response>
+group::store_txn_offsets(txn_offset_commit_request&& req) {
+    if (_partition->term() != _term) {
+        co_return txn_offset_commit_response(req, error_code::unknown_server_error);
+    }
+
+    auto r = std::move(req);
+    model::producer_identity pid {
+        .id = r.data.producer_id,
+        .epoch = r.data.producer_epoch
+    };
+
+    auto tx_it = _volatile_txs.find(pid);
+
+    if (tx_it == _volatile_txs.end()) {
+        co_return txn_offset_commit_response(req, error_code::unknown_server_error);
+    }
+
+    for (const auto& t : r.data.topics) {
+        for (const auto& p : t.partitions) {
+            model::topic_partition tp(t.name, p.partition_index);
+            volatile_offset md {
+              .offset = p.committed_offset,
+              .leader_epoch = p.committed_leader_epoch,
+              .metadata = p.committed_metadata
+            };
+            tx_it->second.offsets[tp] = md;
+        }
+    }
+
+    co_return txn_offset_commit_response(r, error_code::none);
+}
+
 ss::future<offset_commit_response>
 group::store_offsets(offset_commit_request&& r) {
-    cluster::simple_batch_builder builder(
-      raft::data_batch_type, model::offset(0));
+    cluster::simple_batch_builder builder(raft::data_batch_type, model::offset(0));
 
-    std::vector<std::pair<model::topic_partition, offset_metadata>>
-      offset_commits;
+    std::vector<std::pair<model::topic_partition, offset_metadata>> offset_commits;
 
     for (const auto& t : r.data.topics) {
         for (const auto& p : t.partitions) {
@@ -1245,6 +1276,23 @@ group::store_offsets(offset_commit_request&& r) {
 
           return offset_commit_response(req, error);
       });
+}
+
+ss::future<txn_offset_commit_response>
+group::handle_txn_offset_commit(txn_offset_commit_request&& r) {
+    if (in_state(group_state::dead)) {
+        co_return txn_offset_commit_response(r, error_code::coordinator_not_available);
+    } else if (in_state(group_state::empty)) {
+        // <kafka>The group is only using Kafka to store offsets.</kafka>
+        co_return co_await store_txn_offsets(std::move(r));
+    } else if (in_state(group_state::stable) || in_state(group_state::preparing_rebalance)) {
+        co_return co_await store_txn_offsets(std::move(r));
+    } else if (in_state(group_state::completing_rebalance)) {
+        co_return txn_offset_commit_response(r, error_code::rebalance_in_progress);
+    } else {
+        vlog(klog.error, "Unexpected group state {} for {}", _state, *this);
+        co_return txn_offset_commit_response(r, error_code::unknown_server_error);
+    }
 }
 
 ss::future<offset_commit_response>

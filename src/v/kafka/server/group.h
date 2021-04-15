@@ -107,6 +107,7 @@ public:
         model::offset log_offset;
         model::offset offset;
         ss::sstring metadata;
+        // TODO support leader_epoch
     };
 
     group(
@@ -396,8 +397,13 @@ public:
 
     void reset_tx_state(model::term_id);
 
+    ss::future<txn_offset_commit_response> store_txn_offsets(txn_offset_commit_request&& r);
+    
     ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
 
+    ss::future<txn_offset_commit_response>
+    handle_txn_offset_commit(txn_offset_commit_request&& r);
+    
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);
 
@@ -456,6 +462,18 @@ private:
     model::term_id _term;
     absl::node_hash_map<model::topic_partition, offset_metadata>
       _pending_offset_commits;
+
+    struct volatile_offset {
+        model::offset offset;
+        int32_t leader_epoch;
+        std::optional<ss::sstring> metadata;
+    };
+
+    struct volatile_tx {
+        absl::node_hash_map<model::topic_partition, volatile_offset> offsets;
+    };
+
+    absl::node_hash_map<model::producer_identity, volatile_tx> _volatile_txs;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;

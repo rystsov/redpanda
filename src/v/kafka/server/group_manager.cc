@@ -239,7 +239,7 @@ ss::future<> group_manager::handle_partition_leader_change(
                   0,
                   std::numeric_limits<size_t>::max(),
                   kafka_read_priority(),
-                  raft::data_batch_type,
+                  std::nullopt,
                   std::nullopt,
                   std::nullopt);
 
@@ -298,7 +298,15 @@ ss::future<> group_manager::recover_partition(
             }
         }
     }
-    
+
+    for (auto& [group_id, group_stm] : ctx.groups) {
+        auto group = get_group(group_id);
+        if (!group) {
+            group = ss::make_lw_shared<kafka::group>(group_id, group_state::empty, _conf, p);
+        }
+        _groups.emplace(group_id, group);
+    }
+
     /*
      * <kafka>if the cache already contains a group which should be removed,
      * raise an error. Note that it is possible (however unlikely) for a
@@ -320,24 +328,26 @@ ss::future<> group_manager::recover_partition(
 
 ss::future<ss::stop_iteration>
 recovery_batch_consumer::operator()(model::record_batch batch) {
-    if (unlikely(batch.header().type != raft::data_batch_type)) {
-        klog.trace("ignorning batch with type {}", int(batch.header().type));
-        return ss::make_ready_future<ss::stop_iteration>(
-          ss::stop_iteration::no);
-    }
     if (as.abort_requested()) {
         return ss::make_ready_future<ss::stop_iteration>(
           ss::stop_iteration::yes);
     }
-    batch_base_offset = batch.base_offset();
-    return ss::do_with(
-             std::move(batch),
-             [this](model::record_batch& batch) {
-                 return model::for_each_record(batch, [this](model::record& r) {
-                     return handle_record(std::move(r));
-                 });
-             })
-      .then([] { return ss::stop_iteration::no; });
+
+    if (batch.header().type == raft::data_batch_type) {
+        batch_base_offset = batch.base_offset();
+        return ss::do_with(
+                std::move(batch),
+                [this](model::record_batch& batch) {
+                    return model::for_each_record(batch, [this](model::record& r) {
+                        return handle_record(std::move(r));
+                    });
+                })
+          .then([] { return ss::stop_iteration::no; });
+    } else {
+        klog.trace("ignorning batch with type {}", int(batch.header().type));
+        return ss::make_ready_future<ss::stop_iteration>(
+          ss::stop_iteration::no);
+    }
 }
 
 ss::future<> recovery_batch_consumer::handle_record(model::record r) {
@@ -354,6 +364,8 @@ ss::future<> recovery_batch_consumer::handle_record(model::record r) {
     case group_log_record_key::type::noop:
         // skip control structure
         return ss::make_ready_future<>();
+    
+    // todo: process tx commit offset by caching in group
 
     default:
         return ss::make_exception_future<>(std::runtime_error(fmt::format(
@@ -551,6 +563,40 @@ group_manager::leave_group(leave_group_request&& r) {
     } else {
         klog.trace("group does not exist");
         return make_leave_error(error_code::unknown_member_id);
+    }
+}
+
+ss::future<txn_offset_commit_response>
+group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
+    if (!_catchup_lock.take_reader_lock()) {
+        vlog(klog.warn, "can't process a tx: coordinator_load_in_progress");
+        co_return txn_offset_commit_response(r, error_code::coordinator_load_in_progress);
+    }
+
+    try {
+        auto error = validate_group_status(r.ntp, r.data.group_id, offset_commit_api::key);
+        if (error != error_code::none) {
+            _catchup_lock.release_reader_lock();
+            co_return txn_offset_commit_response(r, error);
+        }
+
+        auto group = get_group(r.data.group_id);
+        if (!group) {
+            // <kafka>the group is not relying on Kafka for group management, so
+            // allow the commit</kafka>
+            auto p = _partitions.find(r.ntp)->second->partition;
+            group = ss::make_lw_shared<kafka::group>(
+            r.data.group_id, group_state::empty, _conf, p);
+            _groups.emplace(r.data.group_id, group);
+            _groups.rehash(0);
+        }
+        
+        auto reply = co_await group->handle_txn_offset_commit(std::move(r));
+        _catchup_lock.release_reader_lock();
+        co_return reply;
+    } catch(...) {
+        _catchup_lock.release_reader_lock();
+        throw;
     }
 }
 
