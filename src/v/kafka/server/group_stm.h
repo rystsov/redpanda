@@ -76,6 +76,10 @@ struct group_log_prepared_tx {
     std::vector<group_log_prepared_tx_offset> offsets;
 };
 
+struct group_log_commit_tx {
+    kafka::group_id group_id;
+};
+
 } // namespace kafka
 
 namespace std {
@@ -104,6 +108,7 @@ public:
     void update_offset(group_log_offset_key, model::offset, group_log_offset_metadata&&);
     void remove_offset(group_log_offset_key);
     void update_prepared(model::offset, group_log_prepared_tx);
+    void commit(model::producer_identity);
 
     bool has_data() {
         return !_is_removed && (_is_loaded || _offsets.size() > 0);

@@ -105,6 +105,7 @@ public:
 
     static constexpr model::control_record_version fence_control_record_version{0};
     static constexpr model::control_record_version prepared_tx_record_version{0};
+    static constexpr model::control_record_version commit_tx_record_version{0};
 
     struct offset_metadata {
         model::offset log_offset;
@@ -406,6 +407,8 @@ public:
 
     void reset_tx_state(model::term_id);
 
+    ss::future<cluster::commit_group_tx_reply> commit_tx(cluster::commit_group_tx_request&& r);
+
     ss::future<cluster::begin_group_tx_reply> begin_tx(cluster::begin_group_tx_request&&);
 
     ss::future<cluster::prepare_group_tx_reply> prepare_tx(cluster::prepare_group_tx_request&&);
@@ -425,6 +428,9 @@ public:
     
     ss::future<offset_commit_response>
     handle_offset_commit(offset_commit_request&& r);
+
+    ss::future<cluster::commit_group_tx_reply>
+    handle_commit_tx(cluster::commit_group_tx_request&&);
 
     ss::future<offset_fetch_response>
     handle_offset_fetch(offset_fetch_request&& r);
