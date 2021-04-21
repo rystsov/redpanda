@@ -8,8 +8,10 @@
 // by the Apache License, Version 2.0
 
 #include "kafka/server/handlers/add_offsets_to_txn.h"
+#include "kafka/server/handlers/add_partitions_to_txn.h"
 
 #include "cluster/topics_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/logger.h"
@@ -23,13 +25,19 @@
 namespace kafka {
 
 template<>
-ss::future<response_ptr> add_offsets_to_txn_handler::handle(
-  request_context ctx, [[maybe_unused]] ss::smp_service_group g) {
+ss::future<response_ptr>
+add_offsets_to_txn_handler::handle(request_context ctx, ss::smp_service_group) {
      return ss::do_with(std::move(ctx), [](request_context& ctx) {
         add_offsets_to_txn_request request;
         request.decode(ctx.reader(), ctx.header().version);
-        return ss::make_exception_future<response_ptr>(std::runtime_error(
-          fmt::format("Unsupported API {}", ctx.header().key)));
+
+        auto f = ctx.tx_gateway_frontend().add_offsets_to_tx(request.data, config::shard_local_cfg().create_topic_timeout_ms());
+
+        return f.then([&ctx](add_offsets_to_txn_response_data data) {
+            add_offsets_to_txn_response res;
+            res.data = data;
+            return ctx.respond(std::move(res));
+        });
      });
 }
 
