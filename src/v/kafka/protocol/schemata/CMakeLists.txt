@@ -49,6 +49,8 @@ set(schemata
   create_acls_response.json
   delete_acls_request.json
   delete_acls_response.json
+  add_partitions_to_txn_request.json
+  add_partitions_to_txn_response.json
   txn_offset_commit_request.json
   txn_offset_commit_response.json)
 
