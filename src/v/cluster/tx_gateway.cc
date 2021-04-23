@@ -15,6 +15,7 @@
 #include "model/record_batch_reader.h"
 #include "cluster/rm_group_frontend.h"
 #include "cluster/rm_partition_frontend.h"
+#include "cluster/tx_gateway_frontend.h"
 #include <seastar/core/coroutine.hh>
 
 #include <seastar/core/sharded.hh>
@@ -33,8 +34,8 @@ tx_gateway::tx_gateway(
   , _rm_partition_frontend(rm_partition_frontend) {}
 
 ss::future<init_tm_tx_reply>
-tx_gateway::init_tm_tx(init_tm_tx_request&&, rpc::streaming_context&) {
-    return ss::make_ready_future<init_tm_tx_reply>(init_tm_tx_reply());
+tx_gateway::init_tm_tx(init_tm_tx_request&& request, rpc::streaming_context&) {
+    return _tx_gateway_frontend.local().init_tm_tx_locally(request.tx_id, request.timeout);
 }
 
 ss::future<begin_tx_reply>
