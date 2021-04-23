@@ -582,6 +582,17 @@ void application::wire_up_redpanda_services() {
       std::ref(controller->get_partition_leaders()),
       std::ref(controller))
       .get();
+    
+    syschecks::systemd_message("Creating group resource manager frontend").get();
+    construct_service(
+      rm_group_frontend,
+      std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
+      std::ref(controller),
+      std::ref(coordinator_ntp_mapper),
+      std::ref(group_router))
+      .get();
 
     rpc::server_configuration kafka_cfg("kafka_rpc");
     kafka_cfg.max_service_memory_per_core = memory_groups::kafka_total_memory();
