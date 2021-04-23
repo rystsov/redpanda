@@ -14,6 +14,7 @@
 #include "model/namespace.h"
 #include "model/record_batch_reader.h"
 #include "cluster/tx_gateway_frontend.h"
+#include "cluster/rm_group_frontend.h"
 #include <seastar/core/coroutine.hh>
 
 #include <seastar/core/sharded.hh>
@@ -57,23 +58,23 @@ tx_gateway::abort_tx(abort_tx_request&&, rpc::streaming_context&) {
 }
 
 ss::future<begin_group_tx_reply>
-tx_gateway::begin_group_tx([[maybe_unused]] begin_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
-    co_return begin_group_tx_reply();
+tx_gateway::begin_group_tx(begin_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
+    return _rm_group_frontend.local().do_begin_group_tx(request.group_id, request.pid, request.timeout);
 };
 
 ss::future<prepare_group_tx_reply>
 tx_gateway::prepare_group_tx(prepare_group_tx_request&& request, [[maybe_unused]] rpc::streaming_context&) {
-    co_return prepare_group_tx_reply();
+    return _rm_group_frontend.local().do_prepare_group_tx(request.group_id, request.etag, request.pid, request.tx_seq, request.timeout);
 };
 
 ss::future<commit_group_tx_reply>
 tx_gateway::commit_group_tx(commit_group_tx_request&& request, rpc::streaming_context&) {
-    co_return commit_group_tx_reply();
+    return _rm_group_frontend.local().do_commit_group_tx(request.group_id, request.pid, request.tx_seq, request.timeout);
 };
 
 ss::future<abort_group_tx_reply>
 tx_gateway::abort_group_tx(abort_group_tx_request&& request, rpc::streaming_context&) {
-    co_return abort_group_tx_reply();
+    return _rm_group_frontend.local().do_abort_group_tx(request.group_id, request.pid, request.timeout);
 }
 
 } // namespace cluster
