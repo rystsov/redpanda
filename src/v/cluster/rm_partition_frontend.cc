@@ -46,4 +46,422 @@ rm_partition_frontend::rm_partition_frontend(
     , _metadata_dissemination_retries(config::shard_local_cfg().metadata_dissemination_retries.value())
     , _metadata_dissemination_retry_delay_ms(config::shard_local_cfg().metadata_dissemination_retry_delay_ms.value()) {}
 
+ss::future<begin_tx_reply>
+rm_partition_frontend::begin_tx(model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        return ss::make_ready_future<begin_tx_reply>(begin_tx_reply {
+            .ntp = ntp,
+            .ec = tx_errc::partition_not_exists
+        });
+    }
+
+    auto leader = _leaders.local().get_leader(ntp);
+    if (!leader) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        return ss::make_ready_future<begin_tx_reply>(begin_tx_reply {
+            .ntp = ntp,
+            .ec = tx_errc::leader_not_found
+        });
+    }
+
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        return do_begin_tx(ntp, pid);
+    }
+
+    vlog(clusterlog.trace, "dispatching begin tx to {} from {}", leader, _self);
+
+    return dispatch_begin_tx(leader.value(), ntp, pid, timeout);
+}
+
+ss::future<begin_tx_reply>
+rm_partition_frontend::dispatch_begin_tx(model::node_id leader, model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [ntp, pid, timeout](tx_gateway_client_protocol cp) {
+            return cp.begin_tx(
+              begin_tx_request {
+                  .ntp = ntp,
+                  .pid = pid
+              },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<begin_tx_reply>)
+      .then([ntp](result<begin_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote abort tx",
+                r.error());
+              return begin_tx_reply {
+                  .ntp = ntp,
+                  .ec = tx_errc::timeout
+              };
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<begin_tx_reply>
+rm_partition_frontend::do_begin_tx(model::ntp ntp, model::producer_identity pid) {
+    auto shard = _shard_table.local().shard_for(ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", ntp);
+        return ss::make_ready_future<begin_tx_reply>(begin_tx_reply {
+            .ntp = ntp,
+            .ec = tx_errc::shard_not_found
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [ntp, pid](cluster::partition_manager& mgr) mutable {
+          auto partition = mgr.get(ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", ntp);
+              return ss::make_ready_future<begin_tx_reply>(begin_tx_reply {
+                  .ntp = ntp,
+                  .ec = tx_errc::partition_not_found
+              });
+          }
+
+          auto& stm = partition->rm_stm();
+
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tx stm of the {}' partition", ntp);
+              return ss::make_ready_future<begin_tx_reply>(begin_tx_reply{
+                  .ntp = ntp,
+                  .ec = tx_errc::stm_not_found
+              });
+          }
+
+          return stm->begin_tx(pid).then([ntp](auto etag) {
+              if (!etag) {
+                  return begin_tx_reply {
+                      .ntp = ntp,
+                      .ec = tx_errc::leader_not_found
+                  };
+              }
+
+              return begin_tx_reply {
+                  .ntp = ntp,
+                  .etag = etag.value(),
+                  .ec = tx_errc::none
+              };
+          });
+      });
+}
+
+ss::future<prepare_tx_reply>
+rm_partition_frontend::prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        return ss::make_ready_future<prepare_tx_reply>(prepare_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        });
+    }
+
+    auto leader = _leaders.local().get_leader(ntp);
+    if (!leader) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        return ss::make_ready_future<prepare_tx_reply>(prepare_tx_reply {
+            .ec = tx_errc::leader_not_found
+        });
+    }
+
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        return do_prepare_tx(ntp, etag, tm, pid, tx_seq, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching prepare tx to {} from {}", leader, _self);
+
+    return dispatch_prepare_tx(leader.value(), ntp, etag, tm, pid, tx_seq, timeout);
+}
+
+ss::future<prepare_tx_reply>
+rm_partition_frontend::dispatch_prepare_tx(model::node_id leader, model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [ntp, etag, tm, pid, tx_seq, timeout](tx_gateway_client_protocol cp) {
+            return cp.prepare_tx(
+              prepare_tx_request{
+                  .ntp = ntp,
+                  .etag = etag,
+                  .tm = tm,
+                  .pid = pid,
+                  .tx_seq = tx_seq,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<prepare_tx_reply>)
+      .then([](result<prepare_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote prepare tx",
+                r.error());
+              return prepare_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<prepare_tx_reply>
+rm_partition_frontend::do_prepare_tx(model::ntp ntp, model::term_id etag, model::partition_id tm, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    auto shard = _shard_table.local().shard_for(ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", ntp);
+        return ss::make_ready_future<prepare_tx_reply>(prepare_tx_reply {
+            .ec = tx_errc::shard_not_found
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [ntp, etag, tm, pid, tx_seq, timeout](cluster::partition_manager& mgr) mutable {
+          vlog(clusterlog.warn, "timeout {}", timeout);
+          auto partition = mgr.get(ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", ntp);
+              return ss::make_ready_future<prepare_tx_reply>(prepare_tx_reply {
+                  .ec = tx_errc::partition_not_found
+              });
+          }
+
+          auto& stm = partition->rm_stm();
+
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tx stm of the {}' partition", ntp);
+              return ss::make_ready_future<prepare_tx_reply>(prepare_tx_reply{
+                  .ec = tx_errc::stm_not_found
+              });
+          }
+
+          // ok, tx not found, timeout
+          return stm->prepare_tx(etag, tm, pid, tx_seq, timeout).then([](tx_errc ec){
+              return prepare_tx_reply {
+                  .ec = ec
+              };
+          });
+      });
+}
+
+ss::future<commit_tx_reply>
+rm_partition_frontend::commit_tx(model::ntp ntp, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        return ss::make_ready_future<commit_tx_reply>(commit_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        });
+    }
+
+    auto leader = _leaders.local().get_leader(ntp);
+    if (!leader) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        return ss::make_ready_future<commit_tx_reply>(commit_tx_reply {
+            .ec = tx_errc::leader_not_found
+        });
+    }
+
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        return do_commit_tx(ntp, pid, tx_seq, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching commit tx to {} from {}", leader, _self);
+
+    return dispatch_commit_tx(leader.value(), ntp, pid, tx_seq, timeout);
+}
+
+ss::future<commit_tx_reply>
+rm_partition_frontend::dispatch_commit_tx(model::node_id leader, model::ntp ntp, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [ntp, pid, tx_seq, timeout](tx_gateway_client_protocol cp) {
+            return cp.commit_tx(
+              commit_tx_request{
+                  .ntp = ntp,
+                  .pid = pid,
+                  .tx_seq = tx_seq,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<commit_tx_reply>)
+      .then([](result<commit_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote abort tx",
+                r.error());
+              return commit_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<commit_tx_reply>
+rm_partition_frontend::do_commit_tx(model::ntp ntp, model::producer_identity pid, model::tx_seq tx_seq, model::timeout_clock::duration timeout) {
+    
+    auto shard = _shard_table.local().shard_for(ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", ntp);
+        return ss::make_ready_future<commit_tx_reply>(commit_tx_reply {
+            .ec = tx_errc::shard_not_found
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [pid, ntp, tx_seq, timeout](cluster::partition_manager& mgr) mutable {
+          vlog(clusterlog.warn, "timeout {}", timeout);
+          auto partition = mgr.get(ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", ntp);
+              return ss::make_ready_future<commit_tx_reply>(commit_tx_reply {
+                  .ec = tx_errc::partition_not_found
+              });
+          }
+
+          auto& stm = partition->rm_stm();
+
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tx stm of the {}' partition", ntp);
+              return ss::make_ready_future<commit_tx_reply>(commit_tx_reply{
+                  .ec = tx_errc::stm_not_found
+              });
+          }
+
+          return stm->commit_tx(pid, tx_seq, timeout).then([](tx_errc ec){
+              return commit_tx_reply {
+                  .ec = ec
+              };
+          });
+      });
+}
+
+ss::future<abort_tx_reply>
+rm_partition_frontend::abort_tx(model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    auto nt = model::topic_namespace(ntp.ns, ntp.tp.topic);
+    
+    if (!_metadata_cache.local().contains(nt, ntp.tp.partition)) {
+        return ss::make_ready_future<abort_tx_reply>(abort_tx_reply {
+            .ec = tx_errc::partition_not_exists
+        });
+    }
+
+    auto leader = _leaders.local().get_leader(ntp);
+    if (!leader) {
+        vlog(clusterlog.warn, "can't find a leader for {}", ntp);
+        return ss::make_ready_future<abort_tx_reply>(abort_tx_reply {
+            .ec = tx_errc::leader_not_found
+        });
+    }
+
+    auto _self = _controller->self();
+
+    if (leader == _self) {
+        return do_abort_tx(ntp, pid, timeout);
+    }
+
+    vlog(clusterlog.trace, "dispatching abort tx to {} from {}", leader, _self);
+
+    return dispatch_abort_tx(leader.value(), ntp, pid, timeout);
+}
+
+ss::future<abort_tx_reply>
+rm_partition_frontend::dispatch_abort_tx(model::node_id leader, model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+    return _connection_cache.local()
+      .with_node_client<cluster::tx_gateway_client_protocol>(
+        _controller->self(),
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [ntp, pid, timeout](tx_gateway_client_protocol cp) {
+            return cp.abort_tx(
+              abort_tx_request{
+                  .ntp = ntp,
+                  .pid = pid,
+                  .timeout = timeout
+                },
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<abort_tx_reply>)
+      .then([](result<abort_tx_reply> r) {
+          if (r.has_error()) {
+              vlog(
+                clusterlog.warn,
+                "got error {} on remote abort tx",
+                r.error());
+              return abort_tx_reply{ .ec = tx_errc::timeout};
+          }
+
+          return r.value();
+      });
+}
+
+ss::future<abort_tx_reply>
+rm_partition_frontend::do_abort_tx(model::ntp ntp, model::producer_identity pid, model::timeout_clock::duration timeout) {
+
+    auto shard = _shard_table.local().shard_for(ntp);
+
+    if (shard == std::nullopt) {
+        vlog(clusterlog.warn, "can't find a shard for {}", ntp);
+        return ss::make_ready_future<abort_tx_reply>(abort_tx_reply {
+            .ec = tx_errc::shard_not_found
+        });
+    }
+
+    return _partition_manager.invoke_on(
+      *shard, _ssg, [pid, ntp, timeout](cluster::partition_manager& mgr) mutable {
+          vlog(clusterlog.warn, "timeout {}", timeout);
+          auto partition = mgr.get(ntp);
+          if (!partition) {
+              vlog(clusterlog.warn, "can't get partition by {} ntp", ntp);
+              return ss::make_ready_future<abort_tx_reply>(abort_tx_reply {
+                  .ec = tx_errc::partition_not_found
+              });
+          }
+
+          auto& stm = partition->rm_stm();
+
+          if (!stm) {
+              vlog(clusterlog.warn, "can't get tx stm of the {}' partition", ntp);
+              return ss::make_ready_future<abort_tx_reply>(abort_tx_reply{
+                  .ec = tx_errc::stm_not_found
+              });
+          }
+
+          return stm->abort_tx(pid, timeout).then([](tx_errc ec){
+              return cluster::abort_tx_reply {
+                  .ec = ec
+              };
+          });
+      });
+}
+
 } // namespace cluster
