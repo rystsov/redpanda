@@ -4,6 +4,7 @@ public class Consts
 {
     public static String KAFKA_CONNECTION_PROPERTY = "KAFKA_CONNECTION";
     public static String TXES_PROPERTY = "TXES";
+    public static String MEASURES_PROPERTY = "MEASURES";
     
     public static String topic1 = "topic1";
     public static String topic2 = "topic2";
@@ -17,6 +18,15 @@ public class Consts
             return env.get(KAFKA_CONNECTION_PROPERTY);
         } else {
             return "127.0.0.1:9092";
+        }
+    }
+
+    public static String getMeasuresFileName() {
+        var env = System.getenv();
+        if (env.containsKey(MEASURES_PROPERTY)) {
+            return env.get(MEASURES_PROPERTY);
+        } else {
+            return "measures.log";
         }
     }
 

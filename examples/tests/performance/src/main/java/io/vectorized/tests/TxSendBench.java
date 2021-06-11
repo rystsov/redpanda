@@ -3,6 +3,8 @@ package io.vectorized.tests;
 import java.util.Properties;
 import java.lang.Math;
 import java.util.Arrays;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -63,6 +65,12 @@ public class TxSendBench extends Consts
         System.out.println("p50: " + measures[measures.length / 2] + "ns");
         System.out.println("p99: " + measures[(int)(measures.length * 0.99)] + "ns");
         System.out.println("max: " + max + "ns");
+
+        BufferedWriter writer = new BufferedWriter(new FileWriter(getMeasuresFileName()));
+        for (int i=0;i<iterations;i++) {
+            writer.write("" + measures[i] + "\n");
+        }
+        writer.close();
     }
 
     public static void main( String[] args ) throws Exception
