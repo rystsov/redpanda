@@ -17,6 +17,8 @@ redpanda:
 
   auto_create_topics_enabled: true
   default_topic_partitions: 1
+  transaction_coordinator_replication: 1
+  id_allocator_replication: 1
   enable_idempotence: true
   enable_transactions: true
 

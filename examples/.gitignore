@@ -2,3 +2,9 @@ redpanda-single-node/data/
 redpanda-single-node/coredump/
 kafka-single-node/data.kafka/
 kafka-single-node/data.zookeeper/
+redpanda-node-0/data/
+redpanda-node-0/coredump/
+redpanda-node-1/data/
+redpanda-node-1/coredump/
+redpanda-node-2/data/
+redpanda-node-2/coredump/
