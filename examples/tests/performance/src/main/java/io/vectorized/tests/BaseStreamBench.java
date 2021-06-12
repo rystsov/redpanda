@@ -50,6 +50,7 @@ public class BaseStreamBench extends Consts
         Properties pprops = new Properties();
         pprops.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
         pprops.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, connection);
+        pprops.put(ProducerConfig.ACKS_CONFIG, "all");
         pprops.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
         pprops.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
 
