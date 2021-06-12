@@ -4,6 +4,7 @@ public class Consts
 {
     public static String KAFKA_CONNECTION_PROPERTY = "KAFKA_CONNECTION";
     public static String TXES_PROPERTY = "TXES";
+    public static String WARMUP_PROPERTY = "WARMUP";
     public static String MEASURES_PROPERTY = "MEASURES";
     
     public static String topic1 = "topic1";
@@ -34,6 +35,15 @@ public class Consts
         var env = System.getenv();
         if (env.containsKey(TXES_PROPERTY)) {
             return Integer.parseInt(env.get(TXES_PROPERTY));
+        } else {
+            return txes;
+        }
+    }
+
+    public static int getWarmupTxes(int txes) {
+        var env = System.getenv();
+        if (env.containsKey(WARMUP_PROPERTY)) {
+            return Integer.parseInt(env.get(WARMUP_PROPERTY));
         } else {
             return txes;
         }
