@@ -67,7 +67,7 @@ public class TxSendBench extends Consts
         System.out.println("max: " + max + "ns");
 
         BufferedWriter writer = new BufferedWriter(new FileWriter(getMeasuresFileName()));
-        for (int i=0;i<iterations;i++) {
+        for (int i=0;i<measures.length;i++) {
             writer.write("" + measures[i] + "\n");
         }
         writer.close();

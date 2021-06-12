@@ -11,6 +11,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import java.util.Arrays;
 import java.util.function.Function;
 import java.lang.Math;
@@ -168,6 +170,12 @@ public class StreamBench extends Consts
         System.out.println("p50: " + measures[measures.length / 2] + "ns");
         System.out.println("p99: " + measures[(int)(measures.length * 0.99)] + "ns");
         System.out.println("max: " + max + "ns");
+
+        BufferedWriter writer = new BufferedWriter(new FileWriter(getMeasuresFileName()));
+        for (int i=0;i<measures.length;i++) {
+            writer.write("" + measures[i] + "\n");
+        }
+        writer.close();
     }
 
     public static void main( String[] args ) throws Exception

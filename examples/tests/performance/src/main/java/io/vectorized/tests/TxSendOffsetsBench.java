@@ -12,6 +12,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import java.util.Arrays;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import java.util.function.Function;
 import java.lang.Math;
 import java.util.Properties;
